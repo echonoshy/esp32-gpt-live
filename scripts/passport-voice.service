@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Passport subscription voice bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspaces/esp32-gpt-live
+EnvironmentFile=%h/workspaces/esp32-gpt-live/.env
+ExecStart=%h/workspaces/esp32-gpt-live/target/release/passport-voice
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
