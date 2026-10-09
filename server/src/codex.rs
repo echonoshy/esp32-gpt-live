@@ -118,7 +118,7 @@ impl Codex {
             _directory: directory,
             thread: None,
         };
-        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.2.0"},"capabilities":{"experimentalApi":true}})).await?;
+        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.3.0"},"capabilities":{"experimentalApi":true}})).await?;
         this.stdin
             .lock()
             .await

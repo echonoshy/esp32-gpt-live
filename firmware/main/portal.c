@@ -29,14 +29,14 @@ bool portal_updating(void)
 void portal_arm(void)
 {
     if (device_busy() || portal_updating()) {
-        ui_set("请先结束对话", "按下键结束，再长按上键");
+        ui_set("END CHAT FIRST", "Hold OK, then hold UP");
         return;
     }
     atomic_store(&armed_until, esp_timer_get_time() / 1000000 + 300);
     char ip[20], detail[96];
     voice_wifi_ip(ip, sizeof(ip));
-    snprintf(detail, sizeof(detail), "手机打开 http://%s\n5 分钟内可上传固件", ip);
-    ui_set("设置与升级", detail);
+    snprintf(detail, sizeof(detail), "http://%s/", ip);
+    ui_show_settings(detail);
 }
 static esp_err_t error(httpd_req_t *r, const char *status, const char *message)
 {
@@ -136,7 +136,7 @@ static esp_err_t wifi(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     if (device_busy())
-        return error(r, "409 Conflict", "请先按下键结束对话");
+        return error(r, "409 Conflict", "请先长按 OK 结束对话");
     cJSON *j = read_json(r), *ssid = cJSON_GetObjectItem(j, "ssid"),
           *password = cJSON_GetObjectItem(j, "password");
     esp_err_t e = cJSON_IsString(ssid) && cJSON_IsString(password)
@@ -146,7 +146,8 @@ static esp_err_t wifi(httpd_req_t *r)
     if (e != ESP_OK)
         return error(r, "400 Bad Request", "Wi-Fi 保存失败，请检查输入");
     atomic_store(&updating, true);
-    ui_set("网络已保存", "正在重新启动");
+    ui_show_guide();
+    ui_set("WI-FI SAVED", "Restarting...");
     error(r, "200 OK", "Wi-Fi 已保存，设备即将重启");
     xTaskCreate(restart, "restart", 2048, NULL, 4, NULL);
     return ESP_OK;
@@ -160,7 +161,7 @@ static esp_err_t update(httpd_req_t *r)
     atomic_store(&updating, true);
     if (device_busy()) {
         atomic_store(&updating, false);
-        return error(r, "409 Conflict", "请先按下键结束对话");
+        return error(r, "409 Conflict", "请先长按 OK 结束对话");
     }
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     if (!slot || r->content_len < 1024 || r->content_len > slot->size) {
@@ -196,7 +197,8 @@ static esp_err_t update(httpd_req_t *r)
         return error(r, "500 Internal Server Error", "无法准备升级，请重启设备后再试");
     }
     ui_wake();
-    ui_set("正在升级", "保持供电，请勿操作设备");
+    ui_show_guide();
+    ui_set("UPDATING", "Keep power connected");
     e = esp_ota_write(handle, buffer, total);
     int last_percent = -10;
     while (e == ESP_OK && total < r->content_len) {
@@ -213,8 +215,8 @@ static esp_err_t update(httpd_req_t *r)
         int percent = total * 100 / r->content_len;
         if (percent / 10 != last_percent / 10) {
             char detail[64];
-            snprintf(detail, sizeof(detail), "已上传 %d%%，请保持供电", percent);
-            ui_set("正在升级", detail);
+            snprintf(detail, sizeof(detail), "Uploaded %d%%. Keep power on", percent);
+            ui_set("UPDATING", detail);
             last_percent = percent;
         }
     }
@@ -226,11 +228,11 @@ static esp_err_t update(httpd_req_t *r)
         e = esp_ota_set_boot_partition(slot);
     if (e != ESP_OK) {
         atomic_store(&updating, false);
-        ui_set("升级未完成", "保留原固件，可重新上传");
+        ui_set("UPDATE FAILED", "Old firmware kept. Try again");
         return error(r, "400 Bad Request", "上传或固件校验失败，已保留原固件");
     }
     atomic_store(&armed_until, 0);
-    ui_set("升级完成", "正在重新启动");
+    ui_set("UPDATE COMPLETE", "Restarting...");
     error(r, "200 OK", "固件已校验并保存，设备即将重启。请稍后刷新页面。");
     xTaskCreate(restart, "restart", 2048, NULL, 4, NULL);
     return ESP_OK;

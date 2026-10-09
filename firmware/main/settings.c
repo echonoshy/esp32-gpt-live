@@ -4,11 +4,11 @@
 #include "freertos/semphr.h"
 #include <assert.h>
 #include <stdbool.h>
-static settings_t prefs = {55, 65, 60, 180};
+static settings_t prefs = {70, 65, 60, 180};
 static SemaphoreHandle_t lock;
 static bool valid(settings_t p)
 {
-    return p.volume >= 0 && p.volume <= 90 && p.brightness >= 5 && p.brightness <= 100 &&
+    return p.volume >= 0 && p.volume <= 100 && p.brightness >= 5 && p.brightness <= 100 &&
            p.screen_seconds >= 15 && p.screen_seconds <= 600 && p.idle_seconds >= 30 &&
            p.idle_seconds <= 900;
 }
@@ -17,12 +17,27 @@ void settings_init(void)
     lock = xSemaphoreCreateMutex();
     assert(lock);
     nvs_handle_t n;
-    if (nvs_open("gpt_live", NVS_READONLY, &n) != ESP_OK)
+    if (nvs_open("gpt_live", NVS_READWRITE, &n) != ESP_OK)
         return;
     settings_t saved;
     size_t size = sizeof(saved);
-    if (nvs_get_blob(n, "prefs_v2", &saved, &size) == ESP_OK && size == sizeof(saved) &&
-        valid(saved))
+    bool loaded = nvs_get_blob(n, "prefs_v3", &saved, &size) == ESP_OK && size == sizeof(saved) &&
+                  valid(saved);
+    if (!loaded) {
+        size = sizeof(saved);
+        if (nvs_get_blob(n, "prefs_v2", &saved, &size) == ESP_OK && size == sizeof(saved) &&
+            valid(saved)) {
+            // One-time loudness migration, retaining intentional mute and other preferences.
+            if (saved.volume > 0 && saved.volume < 70)
+                saved.volume = 70;
+            loaded = true;
+        }
+        if (loaded) {
+            nvs_set_blob(n, "prefs_v3", &saved, sizeof(saved));
+            nvs_commit(n);
+        }
+    }
+    if (loaded)
         prefs = saved;
     nvs_close(n);
 }
@@ -41,7 +56,7 @@ esp_err_t settings_save(settings_t p)
     nvs_handle_t n;
     esp_err_t err = nvs_open("gpt_live", NVS_READWRITE, &n);
     if (err == ESP_OK) {
-        err = nvs_set_blob(n, "prefs_v2", &p, sizeof(p));
+        err = nvs_set_blob(n, "prefs_v3", &p, sizeof(p));
         if (err == ESP_OK)
             err = nvs_commit(n);
         nvs_close(n);

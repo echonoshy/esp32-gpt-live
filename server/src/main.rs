@@ -434,7 +434,7 @@ async fn run_session(
                                     if value["role"]=="user" {
                                         flow.user_turn();last_activity=tokio::time::Instant::now();
                                     }
-                                    if let Some(message)=caption(&value) {send(&output,message)?;}
+                                    if !continuous {if let Some(message)=caption(&value) {send(&output,message)?;}}
                                 },
                                 _=>{}
                             }

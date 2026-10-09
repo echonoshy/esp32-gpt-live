@@ -40,7 +40,10 @@ typedef enum {
     CMD_CONNECT,
     CMD_OK,
     CMD_STOP,
-    CMD_VOLUME,
+    CMD_VOLUME_UP,
+    CMD_VOLUME_DOWN,
+    CMD_WIFI,
+    CMD_WAKE,
     CMD_SETTINGS,
     CMD_APPLY,
     CMD_DRAIN,
@@ -58,8 +61,9 @@ static SemaphoreHandle_t send_lock;
 static atomic_bool connected, ready, recording, starting, wanted, awaiting_clear, end_pending,
     sticky_error;
 static atomic_bool boot_complete;
+static bool settings_open;
 static atomic_uint epoch, mic_frames, speaker_frames, dropped_frames, playback_refills;
-static atomic_int mic_peak, battery = -1, attempts;
+static atomic_int battery = -1, attempts;
 static atomic_uint listen_after, retry_at, started_at, ready_at, last_output_at;
 static uint32_t now_ms(void)
 {
@@ -87,16 +91,16 @@ int device_battery(void)
 const char *device_state(void)
 {
     if (portal_updating())
-        return "正在升级";
+        return "UPDATING";
     if (!atomic_load(&connected))
-        return "正在连接";
+        return "CONNECTING";
     if (atomic_load(&starting))
-        return "正在接通";
+        return "CONNECTING VOICE";
     if (atomic_load(&recording))
-        return "正在听";
+        return "LISTENING";
     if (atomic_load(&ready))
-        return "正在回复";
-    return "待机";
+        return "SPEAKING";
+    return "IDLE";
 }
 void device_apply_settings(void)
 {
@@ -124,8 +128,8 @@ static void idle_ui(void)
 {
     char ip[20], detail[96];
     voice_wifi_ip(ip, sizeof(ip));
-    snprintf(detail, sizeof(detail), "按 OK 开始连续对话\n设置 http://%s", ip);
-    ui_set("准备好了", detail);
+    snprintf(detail, sizeof(detail), "Speak after LISTENING\nhttp://%s", ip);
+    ui_set("READY", detail);
 }
 static void retry(void)
 {
@@ -138,10 +142,10 @@ static void retry(void)
     if (count > 3) {
         atomic_store(&wanted, false);
         atomic_store(&sticky_error, true);
-        ui_set("连接中断", "请检查网络，按 OK 重试");
+        ui_set("CONNECTION LOST", "Press OK to retry\nHold DOWN for Wi-Fi setup");
     } else {
         atomic_store(&retry_at, now_ms() + (2000 << (count - 1)));
-        ui_set("正在恢复连接", "将重新接通语音，请稍候");
+        ui_set("RECONNECTING", "Please wait...");
     }
 }
 static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data)
@@ -154,7 +158,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         atomic_store(&connected, true);
         if (atomic_load(&wanted)) {
             atomic_store(&retry_at, now_ms() + 1500);
-            ui_set("正在恢复连接", "网络已连通，准备重新接通");
+            ui_set("RECONNECTING", "Opening voice again...");
         } else if (!atomic_load(&sticky_error))
             idle_ui();
         ESP_LOGI(TAG, "device bridge connected");
@@ -167,11 +171,11 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
             atomic_store(&ready, false);
             atomic_store(&starting, false);
             if (!atomic_load(&sticky_error))
-                ui_set("正在连接", "正在连接语音服务器");
+                ui_set("CONNECTING", "Connecting voice server...");
         }
     } else if (event == WEBSOCKET_EVENT_DATA) {
         esp_websocket_event_data_t *frame = data;
-        static char payload[4096];
+        static char payload[1200];
         static size_t received;
         static int opcode;
         if (frame->op_code != 0 && frame->op_code != 1 && frame->op_code != 2)
@@ -214,7 +218,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&ready_at, now_ms());
                     atomic_store(&sticky_error, false);
                 } else if (!strcmp(state->valuestring, "connecting") && atomic_load(&wanted))
-                    ui_set("正在接通", "正在打开订阅语音");
+                    ui_set("CONNECTING VOICE", "Opening subscription voice...");
                 else if (!strcmp(state->valuestring, "idle")) {
                     bool active = atomic_load(&ready) || atomic_load(&starting);
                     mute();
@@ -231,13 +235,13 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&end_pending, false);
                 atomic_store(&listen_after, microphone_deadline());
                 atomic_store(&recording, true);
-                ui_set("正在听", "直接说话，停顿后自动回复");
+                ui_set("LISTENING", "Speak, then pause for reply");
             } else if (!strcmp(type, "playback_begin") && atomic_load(&ready) &&
                        !atomic_load(&awaiting_clear)) {
                 atomic_store(&recording, false);
                 atomic_store(&end_pending, false);
                 atomic_store(&epoch, e);
-                ui_set("正在回复", "按 OK 可打断，然后直接说话");
+                ui_set("SPEAKING", "OK: interrupt and speak");
             } else if (!strcmp(type, "playback_end") && atomic_load(&ready) &&
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
                 atomic_store(&end_pending, true);
@@ -246,15 +250,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&epoch, e);
                 atomic_store(&listen_after, microphone_deadline());
                 atomic_store(&recording, true);
-                ui_set("正在听", "已打断，请继续说话");
-            } else if (!strcmp(type, "transcript") && atomic_load(&ready)) {
-                cJSON *role = cJSON_GetObjectItem(m, "role"),
-                      *text = cJSON_GetObjectItem(m, "text");
-                if (cJSON_IsString(role) && cJSON_IsString(text))
-                    ui_caption(!strcmp(role->valuestring, "user"), text->valuestring);
+                ui_set("LISTENING", "Continue speaking");
             } else if (!strcmp(type, "error")) {
                 cJSON *again = cJSON_GetObjectItem(m, "retryable"),
-                      *message = cJSON_GetObjectItem(m, "message");
+                      *message = cJSON_GetObjectItem(m, "code");
                 if (cJSON_IsTrue(again) && atomic_load(&wanted))
                     retry();
                 else {
@@ -263,8 +262,12 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&ready, false);
                     atomic_store(&starting, false);
                     atomic_store(&sticky_error, true);
-                    ui_set("暂时无法对话",
-                           cJSON_IsString(message) ? message->valuestring : "请按 OK 重试");
+                    ui_set("VOICE UNAVAILABLE",
+                           cJSON_IsString(message) && !strcmp(message->valuestring, "account")
+                               ? "Server login required"
+                           : cJSON_IsString(message) && !strcmp(message->valuestring, "quota")
+                               ? "Voice usage unavailable"
+                               : "Press OK to retry");
                 }
             } else if (!strcmp(type, "ended")) {
                 cJSON *reason = cJSON_GetObjectItem(m, "reason");
@@ -273,9 +276,9 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&ready, false);
                 atomic_store(&starting, false);
                 atomic_store(&sticky_error, true);
-                ui_set("对话已结束", cJSON_IsString(reason) && !strcmp(reason->valuestring, "limit")
-                                         ? "本次已达 30 分钟，按 OK 重新开始"
-                                         : "长时间没有对话，按 OK 重新开始");
+                ui_set("CHAT ENDED", cJSON_IsString(reason) && !strcmp(reason->valuestring, "limit")
+                                         ? "30 min limit. OK: new chat"
+                                         : "Idle timeout. OK: new chat");
             }
             cJSON_Delete(m);
         }
@@ -283,14 +286,24 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
 }
 static void button(bsp_btn_t key, bsp_btn_ev_t event, void *user)
 {
-    if (event == BSP_BTN_PRESS && key == BSP_BTN_OK)
-        enqueue(CMD_OK, 0);
-    else if (event == BSP_BTN_CLICK && key == BSP_BTN_DOWN)
-        enqueue(CMD_STOP, 0);
-    else if (event == BSP_BTN_CLICK && key == BSP_BTN_UP)
-        enqueue(CMD_VOLUME, 0);
-    else if (event == BSP_BTN_LONG && key == BSP_BTN_UP)
-        enqueue(CMD_SETTINGS, 0);
+    static bool held[3];
+    if (event == BSP_BTN_PRESS) {
+        held[key] = false;
+        enqueue(CMD_WAKE, 0);
+    } else if (event == BSP_BTN_LONG) {
+        held[key] = true;
+        if (key == BSP_BTN_OK)
+            enqueue(CMD_STOP, 0);
+        else if (key == BSP_BTN_UP)
+            enqueue(device_busy() ? CMD_VOLUME_UP : CMD_SETTINGS, 0);
+        else if (key == BSP_BTN_DOWN)
+            enqueue(device_busy() && voice_wifi_connected() ? CMD_VOLUME_DOWN : CMD_WIFI, 0);
+    } else if (event == BSP_BTN_RELEASE && !held[key]) {
+        if (key == BSP_BTN_OK)
+            enqueue(CMD_OK, 0);
+        else
+            enqueue(key == BSP_BTN_UP ? CMD_VOLUME_UP : CMD_VOLUME_DOWN, 0);
+    }
 }
 static void command_task(void *unused)
 {
@@ -301,10 +314,25 @@ static void command_task(void *unused)
             ui_wake();
         if (portal_updating())
             continue;
+        if (c.type == CMD_WAKE)
+            continue;
+        if (voice_wifi_provisioning()) {
+            if (c.type == CMD_OK || c.type == CMD_VOLUME_UP || c.type == CMD_VOLUME_DOWN)
+                voice_wifi_setup_next();
+            else if (c.type == CMD_STOP)
+                esp_restart();
+            continue;
+        }
+        if (settings_open && (c.type == CMD_OK || c.type == CMD_STOP)) {
+            settings_open = false;
+            ui_show_guide();
+            idle_ui();
+            continue;
+        }
         if (c.type == CMD_OK && atomic_load(&ready)) {
             mute();
             atomic_store(&awaiting_clear, true);
-            ui_set("正在打断", "请稍候，即将恢复收音");
+            ui_set("INTERRUPTING", "Wait for LISTENING");
             if (!send_json("{\"type\":\"interrupt\"}"))
                 retry();
         } else if (c.type == CMD_CONNECT || c.type == CMD_OK) {
@@ -317,7 +345,6 @@ static void command_task(void *unused)
                 atomic_load(&connected)) {
                 atomic_store(&starting, true);
                 atomic_store(&started_at, now_ms());
-                ui_clear_captions();
                 char start[128];
                 snprintf(start, sizeof(start),
                          "{\"type\":\"start\",\"protocol\":2,\"mode\":\"continuous\",\"idle_"
@@ -326,9 +353,9 @@ static void command_task(void *unused)
                 if (!send_json(start))
                     retry();
                 else
-                    ui_set("正在接通", "接通后直接说话，无需按住按键");
+                    ui_set("CONNECTING VOICE", "Wait for LISTENING");
             } else if (!atomic_load(&connected))
-                ui_set("等待网络", "网络恢复后会自动接通");
+                ui_set("WAITING FOR WI-FI", "Hold DOWN for phone setup");
         } else if (c.type == CMD_STOP) {
             atomic_store(&wanted, false);
             atomic_store(&ready, false);
@@ -346,11 +373,13 @@ static void command_task(void *unused)
                 if (!send_json(message))
                     retry();
             }
-        } else if (c.type == CMD_VOLUME) {
+        } else if (c.type == CMD_VOLUME_UP || c.type == CMD_VOLUME_DOWN) {
             settings_t p = settings_get();
-            p.volume = p.volume >= 85 ? 25 : p.volume + 10;
-            if (p.volume > 90)
-                p.volume = 90;
+            p.volume += c.type == CMD_VOLUME_UP ? 5 : -5;
+            if (p.volume > 100)
+                p.volume = 100;
+            if (p.volume < 0)
+                p.volume = 0;
             if (settings_save(p) == ESP_OK) {
                 bsp_audio_set_volume(p.volume);
                 ui_battery(device_battery(), p.volume);
@@ -359,9 +388,23 @@ static void command_task(void *unused)
             bsp_audio_set_volume(settings_get().volume);
             ui_battery(device_battery(), settings_get().volume);
             ui_wake();
-        } else if (c.type == CMD_SETTINGS)
-            portal_arm();
-        else if (c.type == CMD_FAULT) {
+        } else if (c.type == CMD_SETTINGS) {
+            if (voice_wifi_connected()) {
+                settings_open = true;
+                portal_arm();
+            } else
+                ui_set("WI-FI NOT CONNECTED", "Hold DOWN for phone setup");
+        } else if (c.type == CMD_WIFI) {
+            if (!device_busy() || !voice_wifi_connected()) {
+                atomic_store(&wanted, false);
+                atomic_store(&starting, false);
+                atomic_store(&ready, false);
+                mute();
+                send_json("{\"type\":\"stop\"}");
+                if (voice_wifi_request_setup() != ESP_OK)
+                    ui_set("SETUP UNAVAILABLE", "Please restart and retry");
+            }
+        } else if (c.type == CMD_FAULT) {
             send_json("{\"type\":\"stop\"}");
             retry();
         }
@@ -375,13 +418,6 @@ static void microphone_task(void *unused)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        int peak = 0;
-        for (size_t i = 0; i < SAMPLES; i++) {
-            int v = abs((int)frame[i]);
-            if (v > peak)
-                peak = v;
-        }
-        atomic_store(&mic_peak, peak);
         if (!atomic_load(&recording) || !atomic_load(&connected) ||
             (int32_t)(now_ms() - atomic_load(&listen_after)) < 0)
             continue;
@@ -505,11 +541,13 @@ static void console_task(void *unused)
 static void health_task(void *unused)
 {
     bool gauge = bsp_battery_init() == ESP_OK;
+    if (gauge)
+        atomic_store(&battery, bsp_battery_soc());
+    ui_battery(device_battery(), settings_get().volume);
     unsigned ticks = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100));
         ticks++;
-        ui_level(atomic_load(&recording) ? atomic_load(&mic_peak) / 100 : 0);
         ui_tick(device_busy() || portal_updating());
         if (ticks >= 50 && atomic_exchange(&boot_complete, false)) {
             // Confirm only after hardware, UI, networking and local web service initialized.
@@ -520,6 +558,8 @@ static void health_task(void *unused)
                 ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
         }
         if (ticks % 50 == 0) {
+            if (!gauge && ticks % 300 == 0)
+                gauge = bsp_battery_init() == ESP_OK;
             if (gauge)
                 atomic_store(&battery, bsp_battery_soc());
             ui_battery(device_battery(), settings_get().volume);

@@ -13,3 +13,5 @@
 服务端和固件是新项目；没有改写旧 `ripple-live` 项目或迁移它的应用资源。
 
 第二阶段电量计驱动单独更新自 [AI Passport 官方 bsp_battery.c](https://github.com/FoloToy/ai-passport/blob/main/components/bsp/src/bsp_battery.c)（2026-10-09 读取），沿用官方优特利 520mAh 电池 profile、逐字节读回校验和首次 SOC 等待。旧适配省略 profile 初始化时，当前设备持续返回无效 SOC；不能将它当作百分比显示。其他 BSP 不随本次更新整体替换。
+
+0.3.0 的电量显示异常定位于文字布局：此前中文字库行高 31 像素，而状态栏标签高度 20 像素。改用内置 Montserrat 14，电量/音量各自占据固定 24 像素高区域；保留电量计读取逻辑。音频保持原 I2S 时钟和采样格式，仅通过 esp_codec_dev 的公开音量曲线接口调整响度，最高 0 dB，音量 0 显式静音。

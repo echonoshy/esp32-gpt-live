@@ -150,6 +150,14 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     //   这里只设麦克风模拟 PGA 增益。
     esp_codec_dev_set_in_gain(s_dev, 30.0f);
 
+    // The default curve maps 55% to -22.5 dB. Use the useful speech range;
+    // cap at 0 dB instead of boosting/clipping the PCM stream.
+    esp_codec_dev_vol_map_t points[] = {
+        {0, -50.0f}, {5, -40.0f}, {25, -20.0f}, {50, -9.0f}, {75, -3.0f}, {100, 0.0f}
+    };
+    esp_codec_dev_vol_curve_t curve = {.vol_map = points, .count = sizeof(points)/sizeof(points[0])};
+    if (esp_codec_dev_set_vol_curve(s_dev, &curve) != ESP_CODEC_DEV_OK) return ESP_FAIL;
+
     s_opened = true; s_hz = hz; s_bits = bits; s_ch = ch;
     ESP_LOGI(TAG, "codec 打开 %luHz/%ubit/%uch", (unsigned long)hz, bits, ch);
     return ESP_OK;
@@ -166,5 +174,9 @@ esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
 }
 
 void bsp_audio_set_volume(uint8_t percent) {
-    if (s_dev) esp_codec_dev_set_out_vol(s_dev, percent);
+    if (!s_dev) return;
+    if (percent > 100) percent = 100;
+    int result = esp_codec_dev_set_out_vol(s_dev, percent);
+    if (result == ESP_CODEC_DEV_OK) result = esp_codec_dev_set_out_mute(s_dev, percent == 0);
+    if (result != ESP_CODEC_DEV_OK) ESP_LOGW(TAG, "volume update failed: %d", result);
 }

@@ -5,17 +5,22 @@
 #include "esp_check.h"
 #include "esp_timer.h"
 #include <stdlib.h>
-LV_FONT_DECLARE(passport_cjk_16);
-static lv_obj_t *state_label, *detail_label, *level_bar, *battery, *user_label, *reply_label;
+#include <string.h>
+#include <stdio.h>
+
+// Only built-in Latin fonts. No captions, scrolling labels or level animation.
+static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr;
 static int64_t last_touch;
-static bool screen_on = true;
-static lv_obj_t *label(lv_obj_t *screen, int x, int y, int w, int h, uint32_t color)
+static bool screen_on = true, setup_visible;
+static int shown_battery = -2, shown_volume = -1;
+
+static lv_obj_t *label(int x, int y, int w, int h, uint32_t color)
 {
-    lv_obj_t *obj = lv_label_create(screen);
+    lv_obj_t *obj = lv_label_create(lv_screen_active());
     lv_obj_set_pos(obj, x, y);
     lv_obj_set_size(obj, w, h);
     lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
-    lv_label_set_long_mode(obj, LV_LABEL_LONG_SCROLL);
+    lv_label_set_long_mode(obj, LV_LABEL_LONG_CLIP);
     lv_label_set_text(obj, "");
     return obj;
 }
@@ -29,63 +34,52 @@ void ui_init(void)
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_scrollable(screen, false);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x101820), 0);
-    lv_obj_set_style_text_font(screen, &passport_cjk_16, 0);
-    lv_obj_t *title = label(screen, 14, 14, 126, 22, 0xf0f4f5);
+    lv_obj_set_style_text_font(screen, &lv_font_montserrat_14, 0);
+    lv_obj_t *title = label(14, 12, 212, 26, 0xf0f4f5);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_label_set_text(title, "GPT LIVE");
-    battery = label(screen, 146, 17, 90, 20, 0x94a5ae);
-    state_label = label(screen, 14, 48, 212, 23, 0x80ded0);
-    detail_label = label(screen, 14, 78, 212, 38, 0xa4b5be);
-    user_label = label(screen, 14, 125, 212, 38, 0xa4b5be);
-    reply_label = label(screen, 14, 171, 212, 92, 0xf0f4f5);
-    level_bar = lv_bar_create(screen);
-    lv_obj_set_size(level_bar, 212, 5);
-    lv_obj_set_pos(level_bar, 14, 274);
-    lv_obj_set_style_bg_color(level_bar, lv_color_hex(0x80ded0), LV_PART_INDICATOR);
-    lv_obj_t *hint = label(screen, 14, 290, 212, 20, 0x94a5ae);
-    lv_label_set_text(hint, "OK 对话/打断  ↓结束 ↑音量");
+    battery_label = label(14, 44, 112, 24, 0xf0f4f5);
+    volume_label = label(138, 44, 88, 24, 0xf0f4f5);
+    lv_label_set_text(battery_label, "BAT: --");
+    lv_label_set_text(volume_label, "VOL: --");
+    status_label = label(14, 77, 212, 24, 0x80ded0);
+    guide = label(14, 114, 212, 128, 0xf0f4f5);
+    lv_label_set_text(guide, "OK: start / interrupt\nHold OK: end chat\n\nUP / DOWN: "
+                             "volume\n\nIdle: hold UP for settings\nIdle: hold DOWN for Wi-Fi");
+    detail_label = label(14, 262, 212, 50, 0xa4b5be);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();
-    ui_set("正在启动", "正在准备声音和网络");
+    ui_battery(-1, settings_get().volume);
+    ui_set("STARTING", "Preparing audio and Wi-Fi");
 }
 void ui_set(const char *state, const char *detail)
 {
-    if (!state_label || !bsp_lvgl_lock(100))
+    if (!status_label || !bsp_lvgl_lock(100))
         return;
-    lv_label_set_text(state_label, state);
-    lv_label_set_text(detail_label, detail);
-    bsp_lvgl_unlock();
-}
-void ui_caption(bool user, const char *text)
-{
-    if (!bsp_lvgl_lock(100))
-        return;
-    lv_label_set_text_fmt(user ? user_label : reply_label, "%s%s", user ? "你：" : "", text);
-    bsp_lvgl_unlock();
-}
-void ui_clear_captions(void)
-{
-    if (!bsp_lvgl_lock(100))
-        return;
-    lv_label_set_text(user_label, "");
-    lv_label_set_text(reply_label, "");
-    bsp_lvgl_unlock();
-}
-void ui_level(int level)
-{
-    if (!level_bar || !bsp_lvgl_lock(10))
-        return;
-    lv_bar_set_value(level_bar, level > 100 ? 100 : level, LV_ANIM_OFF);
+    // Keep a scanned setup page stable while background network events arrive.
+    if (!qr) {
+        if (strcmp(lv_label_get_text(status_label), state))
+            lv_label_set_text(status_label, state);
+        if (strcmp(lv_label_get_text(detail_label), detail))
+            lv_label_set_text(detail_label, detail);
+    }
     bsp_lvgl_unlock();
 }
 void ui_battery(int percent, int volume)
 {
     if (!bsp_lvgl_lock(100))
         return;
-    if (percent >= 0)
-        lv_label_set_text_fmt(battery, "%d%% · %d", percent, volume);
-    else
-        lv_label_set_text_fmt(battery, "-- · %d", volume);
+    if (percent != shown_battery) {
+        if (percent >= 0 && percent <= 100)
+            lv_label_set_text_fmt(battery_label, "BAT: %d%%", percent);
+        else
+            lv_label_set_text(battery_label, "BAT: --");
+        shown_battery = percent;
+    }
+    if (volume != shown_volume) {
+        lv_label_set_text_fmt(volume_label, "VOL: %d", volume);
+        shown_volume = volume;
+    }
     bsp_lvgl_unlock();
 }
 void ui_wake(void)
@@ -102,7 +96,7 @@ void ui_tick(bool active)
     if (!bsp_lvgl_lock(10))
         return;
     int64_t now = esp_timer_get_time();
-    if (active) {
+    if (active || setup_visible) {
         last_touch = now;
         if (!screen_on) {
             screen_on = true;
@@ -112,5 +106,56 @@ void ui_tick(bool active)
         bsp_display_backlight(0);
         screen_on = false;
     }
+    bsp_lvgl_unlock();
+}
+static void show_qr(const char *title, const char *payload, const char *instructions, bool setup)
+{
+    ui_wake();
+    if (!bsp_lvgl_lock(100))
+        return;
+    setup_visible = setup;
+    lv_obj_set_hidden(guide, true);
+    lv_label_set_text(status_label, title);
+    lv_label_set_text(detail_label, instructions);
+    if (!qr) {
+        qr = lv_qrcode_create(lv_screen_active());
+        lv_qrcode_set_size(qr, 150);
+        lv_qrcode_set_quiet_zone(qr, true);
+        lv_obj_set_pos(qr, 45, 105);
+        lv_qrcode_set_dark_color(qr, lv_color_black());
+        lv_qrcode_set_light_color(qr, lv_color_white());
+    }
+    if (lv_qrcode_update(qr, payload, strlen(payload)) != LV_RESULT_OK)
+        lv_label_set_text(status_label, "USE ADDRESS BELOW");
+    bsp_lvgl_unlock();
+}
+void ui_show_setup(const char *ssid, bool website)
+{
+    char payload[96], detail[128];
+    if (website) {
+        snprintf(detail, sizeof(detail), "http://192.168.4.1\nOK: back  Hold OK: retry");
+        show_qr("2. SCAN TO SET UP", "http://192.168.4.1/", detail, true);
+    } else {
+        snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", ssid);
+        snprintf(detail, sizeof(detail), "%s\nThen OK for setup page", ssid);
+        show_qr("1. SCAN TO JOIN WI-FI", payload, detail, true);
+    }
+}
+void ui_show_settings(const char *url)
+{
+    char detail[112];
+    snprintf(detail, sizeof(detail), "%s\nOK: back (same Wi-Fi)", url);
+    show_qr("SCAN FOR SETTINGS", url, detail, false);
+}
+void ui_show_guide(void)
+{
+    if (!bsp_lvgl_lock(100))
+        return;
+    if (qr) {
+        lv_obj_delete(qr);
+        qr = NULL;
+    }
+    setup_visible = false;
+    lv_obj_set_hidden(guide, false);
     bsp_lvgl_unlock();
 }
