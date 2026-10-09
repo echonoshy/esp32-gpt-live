@@ -13,7 +13,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 - `mode`：`ptt` 或 `continuous`；畅聊始终全双工。`duplex` 仅保留旧字段兼容，不再关闭畅聊输入。
 - `voice`：cove、juniper、maple、spruce、ember、vale、breeze、arbor、sol。
 - 0.7.3 移除 `pace`、`reply_length`、`language`，服务器忽略旧客户端发送的这些字段，不影响会话启动。语速、回答长短和语言直接由用户在聊天中提出，不设固定系统偏好。
-- 声音设置只保留 Codex 原生音色参数，在会话启动时读取，下一次新对话应用改变。提示词仅描述语音终端能力与等待用户开口，不限定语言、语速、回复长度、闲聊或推理方式。
+- 声音设置只保留 Codex 原生音色参数，在会话启动时读取。0.7.6 起，设备菜单或手机设置页成功保存不同音色会自动 stop/stopped/start，清空旧上下文并以当前聊天模式启动新音色；相同音色、取消和保存失败不重开。提示词仅描述语音终端能力与等待用户开口，不限定语言、语速、回复长度、闲聊或推理方式。
 - 偏好存储在 `prefs_v4`；从 v3/v2 精确读取旧四整数布局，保留音量、亮度和超时。旧 `mode` 字段保留布局兼容但不用于启动，开机总是 PTT，模式不落盘。Wi-Fi NVS 不变。0.7.3 将原三个风格整数保留为无效占位，`prefs_v4` 仍为 40 字节，保存时清零占位，不重置音色、音量或设备偏好。
 
 当前订阅桥使用 Codex CLI 0.159.2。`thread/realtime/listVoices` 返回 v1/v2 两组；该版本 `core/src/realtime_conversation.rs` 的 `validate_realtime_voice` 将 **V3 映射到 V1**，不能把公开 API 的音色直接填入。来源：[对应版本实现](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/realtime_conversation.rs)。
@@ -45,7 +45,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 
 短按停止发送 `cancel`。服务器清空 PTT 输入/回复缓存、递增播放 epoch，设备清旧队列；不关闭 Codex thread。PTT 等下一次按住；畅聊持续收音，但抑制旧输出，等新的用户输入及相应助手增量转写恢复。旧助手的最后一条完成事件不能单独恢复声音。主动停止向上游发送固定的应用控制指令；其完成不等同于音频已停止或上下文精确截断。
 
-`mode:continuous` 和 `mode:ptt` 在同一 thread 内切换。畅聊里有效按住 OK 同样切回 PTT。切模式清理旧播放，下一次明确的新输入恢复输出。音色仍在下一次新对话应用；聊天中的风格要求随本次会话上下文保留。
+`mode:continuous` 和 `mode:ptt` 在同一 thread 内切换。畅聊里有效按住 OK 同样切回 PTT。切模式清理旧播放，下一次明确的新输入恢复输出。更换音色会自动新开对话并清空上下文；仅切换聊天模式时，聊天中的风格要求随本次会话上下文保留。
 
 旧的 200 ms 静音隔离及 playback_drained 轮次控制只用于兼容 PTT 输出，不再参与畅聊。客户端消耗 v3 的 input_transcript.added、output_transcript.added 和 turn.done，空转写完成事件也要结算归属；转写不显示、不存盘。
 

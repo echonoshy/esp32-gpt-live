@@ -8,6 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--font", type=Path, default=ROOT / ".tools/fonts/NotoSansCJKsc-Regular.otf")
+parser.add_argument("--serif-font", type=Path, default=ROOT / ".tools/fonts/NotoSerifCJKsc-Regular.otf")
+parser.add_argument("--latin-font", type=Path, default=ROOT / ".tools/fonts/Poppins-Regular.ttf")
+parser.add_argument("--latin-serif-font", type=Path, default=ROOT / ".tools/fonts/Lora-Regular.ttf")
 parser.add_argument("--converter", type=Path,
                     default=ROOT / ".tools/font-converter/node_modules/lv_font_conv/lv_font_conv.js")
 args = parser.parse_args()
@@ -25,12 +28,16 @@ def symbols(files):
     return "".join(sorted(chars))
 
 
-for size, files in ((18, ["ui.c", "menu.c", "main.c", "wifi.c", "portal.c"]),
+for size, files in ((16, []),
+                    (18, ["ui.c", "menu.c", "main.c", "wifi.c", "portal.c"]),
                     (22, ["ui.c", "menu.c"])):
     chars = symbols(files)
     output = ROOT / f"firmware/main/fonts/ui_font_{size}.c"
-    subprocess.run(["node", str(args.converter), "--font", str(args.font),
-                    "--symbols", chars, "--range", "0x20-0x7e", "--size", str(size),
+    fonts = ["--font", str(args.latin_font if size == 18 else args.latin_serif_font),
+             "--range", "0x20-0x7e"]
+    if chars:
+        fonts += ["--font", str(args.font if size == 18 else args.serif_font), "--symbols", chars]
+    subprocess.run(["node", str(args.converter), *fonts, "--size", str(size),
                     "--bpp", "2", "--format", "lvgl", "--lv-include", "lvgl.h",
                     "--no-compress", "--no-kerning",
                     "-o", str(output)], check=True)
@@ -40,5 +47,5 @@ for size, files in ((18, ["ui.c", "menu.c", "main.c", "wifi.c", "portal.c"]),
                     source, flags=re.MULTILINE)
     output.write_text(source.rstrip() + "\n")
     height = int(re.search(r"\.line_height = (\d+)", source)[1])
-    assert height <= (23 if size == 18 else 30), (size, height)
+    assert height <= {16: 22, 18: 23, 22: 30}[size], (size, height)
     print(f"{output.name}: {len(chars)} non-ASCII glyphs + ASCII; line height {height} px")

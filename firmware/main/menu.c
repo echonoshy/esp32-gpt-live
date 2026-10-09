@@ -85,7 +85,7 @@ void menu_refresh(void)
         for (int i = 0; i < VOICE_COUNT; i++)
             snprintf(rows[i], sizeof(rows[i]), "%s%s", i == p.voice ? "* " : "", settings_voice(i));
         snprintf(rows[VOICE_COUNT], sizeof(rows[VOICE_COUNT]), "返回上一级");
-        snprintf(hint, sizeof(hint), "OK 保存，新对话生效");
+        snprintf(hint, sizeof(hint), "换音色自动新开对话");
         break;
     case CONFIRM_NEW:
         snprintf(title, sizeof(title), "重置上下文？");
@@ -235,13 +235,16 @@ menu_action_t menu_key(int key)
             enter((page_t[]){CONFIRM_WIFI, INFO, ROOT}[selected]);
             break;
         case PICK_VOICE:
-            if (selected < VOICE_COUNT) {
-                p.voice = selected;
-                changed = true;
+            if (selected == VOICE_COUNT || selected == p.voice)
+                return menu_back();
+            p.voice = selected;
+            if (settings_save(p) != ESP_OK) {
+                const char *message[] = {"设置保存失败", "请按 OK 重试"};
+                ui_show_menu("保存失败", message, 2, 0, "长按 OK 返回上一级");
+                return MENU_NONE;
             }
-            enter(ROOT);
-            selected = 2;
-            break;
+            menu_back();
+            return MENU_VOICE_CHANGED;
         case CONFIRM_NEW:
             if (selected == 0)
                 return MENU_NEW_CHAT;

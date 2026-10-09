@@ -11,17 +11,18 @@
 // Flash-resident, 2 bpp subsets of the static UI text. No transcript or animation.
 LV_FONT_DECLARE(ui_font_18);
 LV_FONT_DECLARE(ui_font_22);
+LV_FONT_DECLARE(ui_font_16);
 static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr,
     *volume_popup, *mode_label, *selection, *status_surface;
-// Quiet paper-and-lilac palette; solid RGB565 fills keep the screen inexpensive to draw.
+// Anthropic-inspired paper, ink and clay; solid RGB565 fills keep drawing inexpensive.
 enum {
-    UI_BACKGROUND = 0xf7f5f9,
-    UI_TEXT = 0x36323f,
-    UI_MUTED = 0x716977,
-    UI_ACCENT = 0x735b83,
-    UI_SURFACE = 0xece5f1,
-    UI_SELECTION = 0xe3d8eb,
-    UI_WARNING = 0xa64a64,
+    UI_BACKGROUND = 0xfaf9f5,
+    UI_TEXT = 0x141413,
+    UI_MUTED = 0x6b685f,
+    UI_ACCENT = 0xd97757,
+    UI_SURFACE = 0xe8e6dc,
+    UI_SELECTION = 0xf2e3dc,
+    UI_WARNING = 0x9b432b,
 };
 static int64_t last_touch, volume_until;
 static bool screen_on = true, setup_visible, menu_visible, live_mode;
@@ -105,12 +106,12 @@ void ui_init(void)
     lv_obj_set_style_bg_color(screen, lv_color_hex(UI_BACKGROUND), 0);
     lv_obj_set_style_text_font(screen, &ui_font_18, 0);
     lv_obj_t *title = label(16, 16, 96, 22, UI_MUTED);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(title, &ui_font_16, 0);
     lv_label_set_text(title, "GPT LIVE");
-    mode_label = label(120, 9, 108, 29, UI_ACCENT);
+    mode_label = label(120, 9, 108, 29, UI_TEXT);
     lv_obj_set_style_bg_color(mode_label, lv_color_hex(UI_SURFACE), 0);
     lv_obj_set_style_bg_opa(mode_label, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(mode_label, 9, 0);
+    lv_obj_set_style_radius(mode_label, 4, 0);
     lv_obj_set_style_pad_top(mode_label, 3, 0);
     lv_obj_set_style_pad_left(mode_label, 8, 0);
     lv_obj_set_style_pad_right(mode_label, 8, 0);
@@ -119,20 +120,23 @@ void ui_init(void)
     battery_label = label(16, 49, 116, 26, UI_MUTED);
     volume_label = label(138, 49, 86, 26, UI_MUTED);
     lv_obj_set_style_text_align(volume_label, LV_TEXT_ALIGN_RIGHT, 0);
-    status_surface = panel(12, 82, 216, 43, UI_SURFACE, 12);
+    status_surface = panel(12, 88, 3, 29, UI_ACCENT, 0);
     status_label = label(24, 90, 192, 30, UI_TEXT);
     lv_obj_set_style_text_font(status_label, &ui_font_22, 0);
-    selection = panel(10, 119, 220, 25, UI_SELECTION, 6);
+    selection = panel(10, 119, 220, 25, UI_SELECTION, 2);
+    lv_obj_set_style_border_side(selection, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(selection, 3, 0);
+    lv_obj_set_style_border_color(selection, lv_color_hex(UI_ACCENT), 0);
     lv_obj_set_hidden(selection, true);
     guide = label(18, 137, 208, 120, UI_TEXT);
-    detail_label = label(16, 269, 208, 46, UI_MUTED);
+    detail_label = label(16, 269, 208, 48, UI_MUTED);
     lv_obj_set_style_text_line_space(detail_label, 2, 0);
-    volume_popup = label(48, 179, 144, 44, UI_ACCENT);
+    volume_popup = label(48, 179, 144, 44, UI_TEXT);
     lv_obj_set_style_text_align(volume_popup, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_top(volume_popup, 10, 0);
     lv_obj_set_style_bg_color(volume_popup, lv_color_hex(UI_SELECTION), 0);
     lv_obj_set_style_bg_opa(volume_popup, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(volume_popup, 12, 0);
+    lv_obj_set_style_radius(volume_popup, 5, 0);
     lv_obj_set_hidden(volume_popup, true);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();

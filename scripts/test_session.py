@@ -337,6 +337,23 @@ async def check():
                 await send('stop')
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
                 print('PASS: protocol 7 batches and final 3-frame tail arrive before release; older protocols remain supported')
+                # Voice changes use the same stop/stopped/start boundary in both input modes.
+                for mode in ('ptt', 'continuous'):
+                    previous_thread = None
+                    for voice in ('cove', 'breeze'):
+                        messages.clear()
+                        await send('start', protocol=7, mode=mode, voice=voice)
+                        await until(lambda: any(isinstance(m, dict) and m.get('state') == 'ready' for m in messages))
+                        current = events('session')[-1]
+                        assert current['voice'] == voice and current['thread'] != previous_thread
+                        previous_thread = current['thread']
+                        if mode == 'continuous':
+                            await until(lambda: any(isinstance(m, dict) and m.get('type') == 'listen' for m in messages))
+                        else:
+                            assert not any(isinstance(m, dict) and m.get('type') == 'listen' for m in messages)
+                        await send('stop')
+                        await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                print('PASS: new voice reaches a fresh conversation while preserving PTT or continuous input mode')
                 # A silent probe must never create a Codex or media session.
                 sessions_before_probe = len(events('session'))
                 messages.clear()

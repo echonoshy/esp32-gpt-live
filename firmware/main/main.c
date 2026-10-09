@@ -53,6 +53,7 @@ typedef enum {
     CMD_WAKE,
     CMD_SETTINGS,
     CMD_APPLY,
+    CMD_VOICE_CHANGED,
     CMD_DRAIN,
     CMD_FAULT,
     CMD_PTT_PREPARE,
@@ -166,9 +167,11 @@ const char *device_state(void)
     }
     return "IDLE";
 }
-void device_apply_settings(void)
+void device_apply_settings(bool voice_changed)
 {
-    enqueue(CMD_APPLY, 0);
+    command_t c = {voice_changed ? CMD_VOICE_CHANGED : CMD_APPLY, 0};
+    // HTTP settings saves must not silently lose the apply/restart request to a full queue.
+    xQueueSend(commands, &c, portMAX_DELAY);
 }
 void device_netcheck(void)
 {
@@ -541,7 +544,8 @@ static void show_home(void)
 }
 static void start_session(void)
 {
-    if (!atomic_load(&wanted) || atomic_load(&starting) || atomic_load(&ready))
+    if (!atomic_load(&wanted) || atomic_load(&starting) || atomic_load(&ready) ||
+        atomic_load(&restart_pending))
         return;
     if (!atomic_load(&connected)) {
         ui_set("SERVER NOT CONNECTED", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
@@ -578,6 +582,21 @@ static void stop_session(void)
     mute();
     atomic_store(&interaction_active, false);
     send_json("{\"type\":\"stop\"}");
+}
+static void new_conversation(bool voice_changed)
+{
+    atomic_store(&menu_active, false);
+    atomic_store(&settings_open, false);
+    menu_notice = false;
+    ui_show_guide();
+    // Reuse the stop acknowledgement if another change is already waiting for it.
+    if (!atomic_exchange(&restart_pending, true))
+        stop_session();
+    ui_set("NEW CONVERSATION", voice_changed ? "音色已切换，正在重开" : "正在清空上一段对话");
+    if (!atomic_load(&connected)) {
+        atomic_store(&restart_pending, false);
+        enqueue(CMD_NEW_START, 0);
+    }
 }
 static void close_menu(void)
 {
@@ -623,7 +642,8 @@ static void command_task(void *unused)
             atomic_store(&full_duplex, false);
             xSemaphoreGive(send_lock);
             show_home();
-            continue;
+            if (c.type != CMD_VOICE_CHANGED)
+                continue;
         }
         if (voice_wifi_provisioning()) {
             if (c.type == CMD_OK || c.type == CMD_UP || c.type == CMD_DOWN)
@@ -661,14 +681,8 @@ static void command_task(void *unused)
             else if (action == MENU_LIVE) {
                 atomic_store(&menu_active, false);
                 enqueue(CMD_LIVE, 0);
-            } else if (action == MENU_NEW_CHAT) {
-                atomic_store(&menu_active, false);
-                ui_show_guide();
-                atomic_store(&restart_pending, atomic_load(&connected));
-                stop_session();
-                ui_set("NEW CONVERSATION", "正在清空上一段对话");
-                if (!atomic_load(&connected))
-                    enqueue(CMD_NEW_START, 0);
+            } else if (action == MENU_NEW_CHAT || action == MENU_VOICE_CHANGED) {
+                new_conversation(action == MENU_VOICE_CHANGED);
             } else if (action == MENU_WIFI) {
                 stop_session();
                 atomic_store(&menu_active, false);
@@ -829,11 +843,14 @@ static void command_task(void *unused)
                 if (!send_json(message))
                     retry();
             }
+        } else if (c.type == CMD_VOICE_CHANGED) {
+            apply_device_settings();
+            new_conversation(true);
         } else if (c.type == CMD_APPLY) {
             apply_device_settings();
             if (atomic_load(&menu_active))
                 menu_refresh();
-            else if (!device_busy())
+            else if (!atomic_load(&settings_open) && !device_busy())
                 show_home();
         } else if (c.type == CMD_FAULT) {
             send_json("{\"type\":\"stop\"}");

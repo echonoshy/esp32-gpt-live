@@ -119,6 +119,8 @@ static esp_err_t save(httpd_req_t *r)
 {
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
+    if (portal_updating())
+        return error(r, "409 Conflict", "固件更新中，请稍后再保存设置");
     cJSON *j = read_json(r);
     settings_t p = {.volume = integer(j, "volume"),
                     .brightness = integer(j, "brightness"),
@@ -128,12 +130,15 @@ static esp_err_t save(httpd_req_t *r)
                     .voice = integer(j, "voice"),
                     .duplex = 1};
     cJSON_Delete(j);
+    settings_t previous = settings_get();
     esp_err_t e = settings_save(p);
     if (e != ESP_OK)
         return error(r, e == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error",
                      "保存失败，请检查设置后重试");
-    device_apply_settings();
-    return error(r, "200 OK", "设置已保存；音色和超时将在新对话生效");
+    bool voice_changed = p.voice != previous.voice;
+    device_apply_settings(voice_changed);
+    return error(r, "200 OK", voice_changed ? "音色已保存，正在清空上下文并自动开启新对话"
+                                            : "设置已保存；空闲超时将在下次新对话生效");
 }
 static esp_err_t netcheck(httpd_req_t *r)
 {

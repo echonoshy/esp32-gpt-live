@@ -9,12 +9,17 @@ static settings_t prefs = {.volume = 70, .brightness = 65, .screen_seconds = 60,
 static char title[64];
 static int focus, row_count;
 static char rows[10][64];
+static bool save_fails;
+static int saves;
 settings_t settings_get(void)
 {
     return prefs;
 }
 esp_err_t settings_save(settings_t p)
 {
+    saves++;
+    if (save_fails)
+        return -1;
     prefs = p;
     return ESP_OK;
 }
@@ -64,8 +69,11 @@ int main(void)
     menu_key(0); // Root opens voice selection directly.
     assert(!strcmp(title, "选择音色"));
     menu_key(1);
-    menu_key(0); // Save the selected voice and return to root.
+    assert(menu_key(0) == MENU_VOICE_CHANGED); // A successful change restarts the conversation.
     assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
+    int saved = saves;
+    menu_key(0);
+    assert(menu_key(0) == MENU_NONE && saves == saved); // Re-selecting the same voice is inert.
     menu_key(0); // Focus stays on voice; reopen at the saved choice.
     assert(!strcmp(title, "选择音色"));
     menu_key(1);
@@ -117,5 +125,18 @@ int main(void)
     assert(!strcmp(title, "网络设置"));
     menu_back();
     assert(menu_back() == MENU_CLOSE);
-    puts("PASS: direct context reset, reset/maintenance confirmation and cancellation, idle setting, voice and menu navigation");
+    menu_open(true);
+    menu_key(1);
+    menu_key(1);
+    menu_key(0);
+    menu_key(1);
+    save_fails = true;
+    assert(menu_key(0) == MENU_NONE && prefs.voice == 1 && !strcmp(title, "保存失败"));
+    save_fails = false;
+    assert(menu_key(0) == MENU_VOICE_CHANGED && prefs.voice == 2); // Retry the same choice in live mode.
+    assert(!strcmp(rows[0], "退出畅聊")); // Saving a voice does not switch input mode.
+    menu_key(0);
+    menu_key(1);
+    assert(menu_back() == MENU_NONE && prefs.voice == 2); // Cancel keeps the saved voice.
+    puts("PASS: voice-change restart action, unchanged/cancel/failure, retry in live mode, reset and maintenance navigation");
 }
