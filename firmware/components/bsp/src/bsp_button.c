@@ -62,8 +62,7 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .max          = BTN_MV[i][1],
         };
         const button_config_t bc = {
-            // Wi-Fi reset is destructive to connectivity, so UP deliberately
-            // requires a longer hold. DOWN keeps the normal status shortcut.
+            // Long UP opens a temporary firmware-update window.
             .long_press_time = i == BSP_BTN_UP ? 3000 : 1500,
         };
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);

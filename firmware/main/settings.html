@@ -1,0 +1,22 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Passport 设置</title>
+<style>body{font:16px system-ui;color:#182c32;background:#edf3f2;max-width:520px;margin:32px auto;padding:0 20px}section{background:white;padding:20px;margin:16px 0;border-radius:16px}h1{margin-bottom:6px}h2{font-size:19px}label{display:block;margin:16px 0}input,select,button{font:inherit}input[type=range]{width:100%;accent-color:#206f66}button{background:#206f66;color:white;border:0;border-radius:8px;padding:12px 18px;cursor:pointer}input[type=text],input[type=password],select{box-sizing:border-box;width:100%;padding:10px;border:1px solid #bdceca;border-radius:6px;margin-top:6px}small,p{color:#52666b;line-height:1.6}#notice{white-space:pre-wrap}progress{width:100%}</style>
+<h1>Passport</h1><p id="status">正在连接设备…</p><section><h2>声音与屏幕</h2><form id="prefs">
+<label>音量 <output id="volText"></output><input id="volume" type="range" min="0" max="90"></label>
+<label>屏幕亮度 <output id="brightText"></output><input id="brightness" type="range" min="5" max="100"></label>
+<label>待机熄屏<select id="screen_seconds"><option value="15">15 秒</option><option value="30">30 秒</option><option value="60">1 分钟</option><option value="120">2 分钟</option><option value="300">5 分钟</option><option value="600">10 分钟</option></select></label>
+<label>无对话时自动结束<select id="idle_seconds"><option value="60">1 分钟</option><option value="180">3 分钟</option><option value="300">5 分钟</option><option value="600">10 分钟</option><option value="900">15 分钟</option></select></label>
+<button>保存设置</button><p>自动结束时长在下一次对话生效。上键调整的音量也会自动保存。</p></form></section>
+<section><h2>连续对话</h2><p>按一次 OK 开始，看到「正在听」后直接说话。回复播完会自动继续听；回复中按 OK 可打断。下键结束对话。</p><p>字幕会在每句话识别完成后显示，较长内容自动滚动。</p></section>
+<section><h2>无线升级</h2><p>先结束对话，长按上键 3 秒开放升级，5 分钟内选择固件并上传。升级期间保持供电。</p><input id="firmware" type="file" accept=".bin"><p><button id="upgrade" type="button">上传固件</button></p><progress id="progress" max="100" value="0"></progress></section>
+<section><h2>更换 Wi-Fi</h2><form id="wifi"><label>网络名称<input id="ssid" type="text" maxlength="32" required autocomplete="off"></label><label>密码<input id="password" type="password" maxlength="64" autocomplete="new-password"></label><button>保存并重启</button><p>新网络连接失败时，设备会开放 GPT-Passport 热点供重新配网。</p></form></section><p id="notice" role="status"></p>
+<script>
+let nonce=''; const $=id=>document.getElementById(id); const note=s=>$('notice').textContent=s;
+function labels(){$('volText').textContent=$('volume').value;$('brightText').textContent=$('brightness').value+'%'}
+async function info(fill=false){try{const r=await fetch('/api/info',{cache:'no-store'});if(!r.ok)throw Error('连接失败');const p=await r.json();nonce=p.nonce;$('status').textContent=p.state+' · 电量 '+(p.battery<0?'--':p.battery+'%')+' · v'+p.version;if(fill){for(const k of ['volume','brightness','screen_seconds','idle_seconds'])$(k).value=p[k];labels()}}catch(e){$('status').textContent='设备未连接，请确认手机与设备在同一 Wi-Fi'}}
+async function post(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Device-Nonce':nonce},body:JSON.stringify(body)});const text=await r.text();if(!r.ok)throw Error(text);note(text)}
+$('volume').oninput=$('brightness').oninput=labels;
+$('prefs').onsubmit=async e=>{e.preventDefault();try{const p={};for(const k of ['volume','brightness','screen_seconds','idle_seconds'])p[k]=Number($(k).value);await post('/api/settings',p)}catch(e){note(e.message)}};
+$('wifi').onsubmit=async e=>{e.preventDefault();if(!confirm('保存新 Wi-Fi 并重启设备？'))return;try{await post('/api/wifi',{ssid:$('ssid').value,password:$('password').value});$('password').value=''}catch(e){note(e.message)}};
+$('upgrade').onclick=()=>{const file=$('firmware').files[0];if(!file){note('请先选择 passport-gpt-live.bin');return}if(!confirm('上传所选固件并重启设备？'))return;const x=new XMLHttpRequest();x.open('POST','/api/update');x.setRequestHeader('Content-Type','application/octet-stream');x.setRequestHeader('X-Device-Nonce',nonce);x.timeout=180000;x.upload.onprogress=e=>{if(e.lengthComputable)$('progress').value=e.loaded/e.total*100};x.onload=()=>{note(x.responseText);$('upgrade').disabled=false};x.onerror=x.ontimeout=()=>{note('连接中断，请检查设备屏幕。升级未完成时会保留原固件。');$('upgrade').disabled=false};$('upgrade').disabled=true;note('正在上传，请保持供电…');x.send(file)};
+info(true);setInterval(()=>info(),10000);
+</script></html>

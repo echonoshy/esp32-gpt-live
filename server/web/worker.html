@@ -3,7 +3,7 @@
 'use strict';
 const ws = new WebSocket(`ws://${location.host}/worker?id=${encodeURIComponent(location.hash.slice(1))}`);
 ws.binaryType = 'arraybuffer';
-let ctx, pc, input, capture, channel, ptt = false, started = false;
+let ctx, pc, input, capture, channel, inputEnabled = false, started = false;
 const report = value => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); };
 const fail = error => report({type:'error', message:String(error)});
 ws.onopen = async () => {
@@ -26,7 +26,7 @@ ws.onopen = async () => {
       player.play().catch(fail);
       capture = new AudioWorkletNode(ctx,'pcm-output');
       capture.port.onmessage = ({data}) => {
-        if (!started || ptt || ws.readyState!==WebSocket.OPEN) return;
+        if (!started || ws.readyState!==WebSocket.OPEN) return;
         if (ws.bufferedAmount>24000) {fail('output audio backpressure');ws.close();return;}
         ws.send(data);
       };
@@ -37,6 +37,7 @@ ws.onopen = async () => {
     channel.onmessage=({data})=>{
       try {
         const event=JSON.parse(data);
+        if(event.type==='turn.started' && event.turn?.role==='user')report({type:'user_started'});
         if (event.type==='turn.done' && event.turn?.transcript) report({type:'transcript',role:event.turn.role,text:event.turn.transcript});
       } catch(error){fail(error);}
     };
@@ -50,11 +51,10 @@ ws.onopen = async () => {
 };
 ws.onmessage=async({data})=>{
   try {
-    if(data instanceof ArrayBuffer){if(ptt)input.port.postMessage(data,[data]);return;}
+    if(data instanceof ArrayBuffer){if(inputEnabled)input.port.postMessage(data,[data]);return;}
     const event=JSON.parse(data);
     if(event.type==='answer') await pc.setRemoteDescription({type:'answer',sdp:event.sdp});
-    if(event.type==='ptt_start'){ptt=true;input.port.postMessage('clear');}
-    if(event.type==='ptt_end'){ptt=false; /* drain captured tail before silence */}
+    if(event.type==='input'){inputEnabled=Boolean(event.enabled);if(event.clear)input.port.postMessage('clear');}
   } catch(error){fail(error);}
 };
 ws.onclose=()=>{pc?.close();ctx?.close();};

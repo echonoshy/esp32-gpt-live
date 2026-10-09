@@ -92,6 +92,8 @@ impl Codex {
                                 Ok(message["result"].clone())
                             };
                             let _ = reply.send(result);
+                        } else if message.get("error").is_some() {
+                            let _ = tx.try_send(json!({"method":"passport/controlError"}));
                         }
                     }
                 } else if message["method"]
@@ -116,7 +118,7 @@ impl Codex {
             _directory: directory,
             thread: None,
         };
-        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await?;
+        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.2.0"},"capabilities":{"experimentalApi":true}})).await?;
         this.stdin
             .lock()
             .await
@@ -157,6 +159,23 @@ impl Codex {
             .to_owned();
         self.thread = Some(thread.clone());
         self.rpc("thread/realtime/start",json!({"threadId":thread,"version":"v3","outputModality":"audio","transport":{"type":"webrtc","sdp":sdp},"codexResponseHandoffMode":"commentary","includeStartupContext":false,"prompt":PROMPT})).await?;
+        Ok(())
+    }
+
+    pub async fn interrupt(&mut self) -> Result<()> {
+        let thread = self.thread.as_ref().context("voice thread not ready")?;
+        self.next_id += 1;
+        // Local audio is cleared immediately. This app-authored instruction also steers
+        // the remote voice engine away from the superseded reply, keeping its context.
+        let line = json!({"id":self.next_id,"method":"thread/realtime/appendText","params":{
+            "threadId":thread,"role":"developer",
+            "text":"用户按下了打断键。立即停止上一条回复并等待用户的新问题，不要朗读或回应这条控制指令。"
+        }});
+        self.stdin
+            .lock()
+            .await
+            .write_all(format!("{line}\n").as_bytes())
+            .await?;
         Ok(())
     }
 

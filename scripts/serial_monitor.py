@@ -1,4 +1,4 @@
-"""USB monitor: type connect, record, listen, stop or tone. Ctrl-C exits."""
+"""USB monitor: type connect, interrupt or stop. Ctrl-C exits."""
 import argparse
 import os
 import select
@@ -19,7 +19,7 @@ attrs[0]=0;attrs[1]=0;attrs[3]=0
 attrs[2]=(attrs[2]|termios.CLOCAL|termios.CREAD)&~termios.HUPCL
 attrs[4]=attrs[5]=termios.B115200
 termios.tcsetattr(fd,termios.TCSANOW,attrs)
-print('USB monitor connected; commands: connect / record / listen / stop / tone',flush=True)
+print('USB monitor connected; commands: connect / interrupt / stop',flush=True)
 try:
     with open(args.log,'a') as log:
         while True:

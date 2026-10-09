@@ -29,7 +29,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Wi-Fi disconnected, reason=%u", event->reason);
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED);
-        ui_set("WIFI", "Reconnecting Wi-Fi");
+        ui_set("网络已断开", "正在重连 Wi-Fi");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Wi-Fi connected, IP acquired");
@@ -43,10 +43,13 @@ esp_err_t voice_wifi_save(const char *ssid, const char *password)
         return ESP_ERR_INVALID_ARG;
     nvs_handle_t nvs;
     esp_err_t result = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &nvs);
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK)
+        return result;
     result = nvs_set_str(nvs, "ssid", ssid);
-    if (result == ESP_OK) result = nvs_set_str(nvs, "password", password);
-    if (result == ESP_OK) result = nvs_commit(nvs);
+    if (result == ESP_OK)
+        result = nvs_set_str(nvs, "password", password);
+    if (result == ESP_OK)
+        result = nvs_commit(nvs);
     nvs_close(nvs);
     return result;
 }
@@ -59,9 +62,11 @@ static bool load_string(nvs_handle_t nvs, const char *key, char *value, size_t s
 
 static int hex_value(char c)
 {
-    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= '0' && c <= '9')
+        return c - '0';
     c = (char)tolower((unsigned char)c);
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
     return -1;
 }
 
@@ -97,7 +102,8 @@ static bool form_value(const char *body, const char *name, char *value, size_t v
             return value[0] != '\0';
         }
         cursor = strchr(cursor, '&');
-        if (cursor) cursor++;
+        if (cursor)
+            cursor++;
     }
     return false;
 }
@@ -105,15 +111,15 @@ static bool form_value(const char *body, const char *name, char *value, size_t v
 static esp_err_t setup_page(httpd_req_t *request)
 {
     static const char page[] =
-        "<!doctype html><meta name=viewport content='width=device-width'>"
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
         "<style>body{font:16px sans-serif;max-width:420px;margin:40px auto;padding:20px}"
         "input,button{box-sizing:border-box;width:100%;padding:12px;margin:7px 0}</style>"
-        "<h1>GPT Live Passport</h1><p>Connect this device to Wi-Fi.</p>"
+        "<h1>GPT Live Passport</h1><p>为设备连接 Wi-Fi。</p>"
         "<form method=post action=/configure>"
-        "<input name=ssid placeholder='Wi-Fi name' required>"
-        "<input name=password type=password placeholder='Wi-Fi password'>"
+        "<input name=ssid placeholder='Wi-Fi 名称' required>"
+        "<input name=password type=password placeholder='Wi-Fi 密码'>"
 
-        "<button>Save and restart</button></form>";
+        "<button>保存并重启</button></form>";
     httpd_resp_set_type(request, "text/html");
     return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
 }
@@ -134,7 +140,8 @@ static esp_err_t save_config(httpd_req_t *request)
     int total = 0;
     while (total < request->content_len) {
         int received = httpd_req_recv(request, body + total, request->content_len - total);
-        if (received <= 0) return ESP_FAIL;
+        if (received <= 0)
+            return ESP_FAIL;
         total += received;
     }
     body[total] = '\0';
@@ -147,9 +154,10 @@ static esp_err_t save_config(httpd_req_t *request)
     (void)form_value(body, "password", password, sizeof(password));
 
     if (voice_wifi_save(ssid, password) != ESP_OK)
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not save Wi-Fi");
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Could not save Wi-Fi");
 
-    ui_set("WIFI", "Saved. Restarting...");
+    ui_set("网络已保存", "正在重新启动");
     httpd_resp_sendstr(request, "Saved. The Passport is restarting.");
     xTaskCreate(delayed_restart, "restart", 2048, NULL, 4, NULL);
     return ESP_OK;
@@ -185,8 +193,8 @@ static esp_err_t start_provisioning(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &configure));
 
     char detail[80];
-    snprintf(detail, sizeof(detail), "%s\nOpen 192.168.4.1", ap_name);
-    ui_set("WIFI SETUP", detail);
+    snprintf(detail, sizeof(detail), "%s\n打开 192.168.4.1", ap_name);
+    ui_set("请先配网", detail);
     ESP_LOGI(TAG, "provisioning AP %s", ap_name);
     return ESP_ERR_NOT_FINISHED;
 }
@@ -206,11 +214,13 @@ esp_err_t voice_wifi_start(void)
     char password[65] = {0};
     bool configured = load_string(nvs, "ssid", ssid, sizeof(ssid));
     size_t password_size = sizeof(password);
-    if (nvs_get_str(nvs, "password", password, &password_size) != ESP_OK) password[0] = '\0';
+    if (nvs_get_str(nvs, "password", password, &password_size) != ESP_OK)
+        password[0] = '\0';
     nvs_close(nvs);
-    if (!configured) return start_provisioning();
+    if (!configured)
+        return start_provisioning();
 
-    ui_set("WIFI", "Connecting Wi-Fi");
+    ui_set("正在联网", "正在连接 Wi-Fi");
     esp_netif_t *station = esp_netif_create_default_wifi_sta();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
@@ -226,9 +236,10 @@ esp_err_t voice_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_connect());
 
-    EventBits_t bits = xEventGroupWaitBits(
-        s_wifi_events, WIFI_CONNECTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
-    if (bits & WIFI_CONNECTED) return ESP_OK;
+    EventBits_t bits =
+        xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
+    if (bits & WIFI_CONNECTED)
+        return ESP_OK;
     ESP_LOGW(TAG, "Saved Wi-Fi unavailable; opening setup hotspot");
     ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event));
     ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event));
@@ -236,4 +247,14 @@ esp_err_t voice_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_deinit());
     esp_netif_destroy_default_wifi(station);
     return start_provisioning();
+}
+
+void voice_wifi_ip(char *output, size_t size)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t info;
+    if (netif && esp_netif_get_ip_info(netif, &info) == ESP_OK)
+        snprintf(output, size, IPSTR, IP2STR(&info.ip));
+    else
+        snprintf(output, size, "192.168.4.1");
 }

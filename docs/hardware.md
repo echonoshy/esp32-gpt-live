@@ -11,3 +11,5 @@
 音频通过 BSP `bsp_audio_*` 访问，保持 ES8311 `no_dac_ref=true`、采样率改变时 close/open、驱动管理时钟寄存器。麦克风和扬声器任务独立运行，不在按键或 WebSocket 回调里执行阻塞 I2S。
 
 服务端和固件是新项目；没有改写旧 `ripple-live` 项目或迁移它的应用资源。
+
+第二阶段电量计驱动单独更新自 [AI Passport 官方 bsp_battery.c](https://github.com/FoloToy/ai-passport/blob/main/components/bsp/src/bsp_battery.c)（2026-10-09 读取），沿用官方优特利 520mAh 电池 profile、逐字节读回校验和首次 SOC 等待。旧适配省略 profile 初始化时，当前设备持续返回无效 SOC；不能将它当作百分比显示。其他 BSP 不随本次更新整体替换。

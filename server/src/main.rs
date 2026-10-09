@@ -1,4 +1,6 @@
 mod codex;
+mod conversation;
+use conversation::{AudioAction, Conversation};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::serve::ListenerExt;
@@ -121,7 +123,7 @@ async fn main() -> Result<()> {
 
 async fn health(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES}),
+        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":2,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 
@@ -185,11 +187,13 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                             if session.is_none() {
                                 let (tx,rx)=mpsc::channel(32);
                                 let output=out.clone();let shared=app.clone();
+                                let continuous=v["mode"]=="continuous" && v["protocol"]==2;
+                                let idle_seconds=v["idle_seconds"].as_u64().unwrap_or(180).clamp(30,900);
                                 session=Some((tx,tokio::spawn(async move {
-                                    if let Err(error)=run_session(shared,rx,output.clone()).await {
+                                    if let Err(error)=run_session(shared,rx,output.clone(),continuous,idle_seconds).await {
                                         // No account tokens, SDP or conversation text in logs.
                                         tracing::warn!(%error,"voice session ended with error");
-                                        let _=send(&output,text(json!({"type":"error","message":"Voice connection failed; press OK to retry"})));
+                                        let _=send(&output,voice_error(&error));
                                     }
                                     let _=send(&output,status("idle"));
                                 })));
@@ -203,7 +207,7 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                                     let _=send(&out,status("idle"));
                                 }
                             } else {let _=send(&out,status("idle"));}
-                        } else if matches!(kind,"ptt_start"|"ptt_end") {
+                        } else if matches!(kind,"ptt_start"|"ptt_end"|"interrupt"|"playback_drained") {
                             if let Some((tx,_))=&session {if send(tx,Message::Text(s)).is_err(){break}}
                         } else if kind!="hello" {break}
                     }
@@ -282,7 +286,13 @@ impl Drop for PendingRegistration {
     }
 }
 
-async fn run_session(app: Shared, mut input: mpsc::Receiver<Message>, output: Tx) -> Result<()> {
+async fn run_session(
+    app: Shared,
+    mut input: mpsc::Receiver<Message>,
+    output: Tx,
+    continuous: bool,
+    idle_seconds: u64,
+) -> Result<()> {
     send(&output, status("connecting"))?;
     let id = Uuid::new_v4().to_string();
     let (waiter, wait) = oneshot::channel();
@@ -321,26 +331,57 @@ async fn run_session(app: Shared, mut input: mpsc::Receiver<Message>, output: Tx
         rpc.start(sdp).await?;
         let mut ready=false;
         let mut ptt=false;
+        let mut flow=Conversation::new();
         let mut last_voice=tokio::time::Instant::now()-Duration::from_secs(1);
         let started=tokio::time::Instant::now();
         let mut last_activity=started;
-        let mut tick=tokio::time::interval(Duration::from_secs(1));
+        let mut interrupt_hint_sent=false;
+        let mut user_energy_frames=0u32;
+        let mut tick=tokio::time::interval(Duration::from_millis(50));
         loop {
             tokio::select! {
                 message=input.recv()=>{
                     let Some(message)=message else {break};
-                    match &message {
+                    match message {
                         Message::Text(s)=>{
-                            let event:Value=serde_json::from_str(s)?;
+                            let event:Value=serde_json::from_str(&s)?;
                             match event["type"].as_str() {
                                 Some("stop")=>break,
-                                Some("ptt_start")=>{ptt=true;last_activity=tokio::time::Instant::now();},
-                                Some("ptt_end")=>{ptt=false;last_activity=tokio::time::Instant::now();},
+                                Some("interrupt") if continuous && ready=>{
+                                    let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
+                                    user_energy_frames=0;interrupt_hint_sent=false;
+                                    last_activity=tokio::time::Instant::now();
+                                    send(&output,text(json!({"type":"clear","epoch":epoch})))?;
+                                    send(&worker.tx,text(json!({"type":"input","enabled":true,"clear":true})))?;
+                                    rpc.interrupt().await?;
+                                },
+                                Some("playback_drained") if continuous=>{
+                                    if let Some(epoch)=event["epoch"].as_u64() {
+                                        if u32::try_from(epoch).ok().is_some_and(|e|flow.drained(e)) {
+                                            send(&worker.tx,text(json!({"type":"input","enabled":true,"clear":true})))?;
+                                            send(&output,text(json!({"type":"listen","epoch":flow.epoch})))?;
+                                        }
+                                    }
+                                },
+                                Some("ptt_start") if !continuous=>{
+                                    ptt=true;last_activity=tokio::time::Instant::now();
+                                    send(&worker.tx,text(json!({"type":"input","enabled":true,"clear":true})))?;
+                                },
+                                Some("ptt_end") if !continuous=>{
+                                    ptt=false;last_activity=tokio::time::Instant::now();
+                                    send(&worker.tx,text(json!({"type":"input","enabled":false,"clear":false})))?;
+                                },
                                 _=>{}
                             }
-                            send(&worker.tx,message)?;
                         },
-                        Message::Binary(_) if ready && ptt=>{last_activity=tokio::time::Instant::now();send(&worker.tx,message)?;},
+                        Message::Binary(bytes) if ready && (if continuous {flow.listening()} else {ptt})=>{
+                            // Silence keeps the WebRTC clock alive, not the user's idle timer.
+                            if rms_above(&bytes,600) {
+                                user_energy_frames+=1;
+                                if user_energy_frames>=4 {flow.user_turn();last_activity=tokio::time::Instant::now();}
+                            } else {user_energy_frames=0;}
+                            send(&worker.tx,Message::Binary(bytes))?;
+                        },
                         _=>{}
                     }
                 },
@@ -348,28 +389,53 @@ async fn run_session(app: Shared, mut input: mpsc::Receiver<Message>, output: Tx
                     let event=event.context("Codex event stream closed")?;
                     match event["method"].as_str() {
                         Some("thread/realtime/sdp")=>send(&worker.tx,text(json!({"type":"answer","sdp":event["params"]["sdp"]})))?,
-                        Some("thread/realtime/error")=>bail!("Codex voice service error"),
-                        Some("thread/realtime/closed")=>break,
+                        Some("thread/realtime/error"|"passport/controlError")=>bail!("Codex voice service rejected control"),
+                        Some("thread/realtime/closed")=>bail!("Codex voice disconnected"),
                         _=>{}
                     }
                 },
                 event=worker.rx.recv()=>{
                     let event=event.context("media worker disconnected")?;
                     match event {
-                        Message::Binary(bytes) if ready && !ptt=>{
+                        Message::Binary(bytes) if ready && (continuous || !ptt)=>{
                             if !valid_pcm(&bytes){bail!("invalid media frame")}
-                            if bytes.chunks_exact(2).any(|s|i16::from_le_bytes([s[0],s[1]]).unsigned_abs()>30) {
-                                last_voice=tokio::time::Instant::now();last_activity=last_voice;
+                            let voiced=bytes.chunks_exact(2).any(|s|i16::from_le_bytes([s[0],s[1]]).unsigned_abs()>30);
+                            if continuous {
+                                let action=flow.audio(started.elapsed().as_millis() as u64,voiced);
+                                if let AudioAction::Begin(epoch)=action {
+                                    send(&worker.tx,text(json!({"type":"input","enabled":false,"clear":true})))?;
+                                    send(&output,text(json!({"type":"playback_begin","epoch":epoch})))?;
+                                }
+                                if let AudioAction::Begin(epoch)|AudioAction::Frame(epoch)=action {
+                                    if voiced {last_activity=tokio::time::Instant::now();}
+                                    let mut tagged=Vec::with_capacity(FRAME_BYTES+4);
+                                    tagged.extend_from_slice(&epoch.to_le_bytes());tagged.extend_from_slice(&bytes);
+                                    send(&output,Message::Binary(tagged.into())).context("device output")?;
+                                }
+                            } else {
+                                if voiced {last_voice=tokio::time::Instant::now();last_activity=last_voice;}
+                                if last_voice.elapsed()<Duration::from_millis(200){send(&output,Message::Binary(bytes)).context("device output")?;}
                             }
-                            // Preserve a short tail, without flooding the WAN link with silence.
-                            if last_voice.elapsed()<Duration::from_millis(200){send(&output,Message::Binary(bytes)).context("device output")?;}
                         },
                         Message::Text(s)=>{
                             let value:Value=serde_json::from_str(&s)?;
                             match value["type"].as_str() {
-                                Some("ready")=>{ready=true;send(&output,status("ready"))?;tracing::info!("voice media ready");},
-                                Some("error")=>bail!("media worker: {}",value["message"]),
-                                Some("transcript")=>send(&output,text(value))?,
+                                Some("ready")=>{
+                                    ready=true;send(&output,status("ready"))?;
+                                    if continuous {
+                                        send(&worker.tx,text(json!({"type":"input","enabled":true,"clear":true})))?;
+                                        send(&output,text(json!({"type":"listen","epoch":flow.epoch})))?;
+                                    }
+                                    tracing::info!(continuous,"voice media ready");
+                                },
+                                Some("error")=>bail!("media worker failed"),
+                                Some("user_started")=>{flow.user_turn();last_activity=tokio::time::Instant::now();},
+                                Some("transcript")=>{
+                                    if value["role"]=="user" {
+                                        flow.user_turn();last_activity=tokio::time::Instant::now();
+                                    }
+                                    if let Some(message)=caption(&value) {send(&output,message)?;}
+                                },
                                 _=>{}
                             }
                         },
@@ -377,8 +443,22 @@ async fn run_session(app: Shared, mut input: mpsc::Receiver<Message>, output: Tx
                     }
                 },
                 _=tick.tick()=>{
+                    let now=started.elapsed().as_millis() as u64;
                     if !ready && started.elapsed()>Duration::from_secs(30){bail!("WebRTC connection timeout")}
-                    if last_activity.elapsed()>Duration::from_secs(120) || started.elapsed()>Duration::from_secs(1800){break}
+                    if continuous {
+                        if let Some(epoch)=flow.end_due(now) {
+                            send(&output,text(json!({"type":"playback_end","epoch":epoch})))?;
+                        }
+                        if flow.interrupt_stalled(now) && !interrupt_hint_sent {
+                            // Input remains enabled while waiting for a fresh user turn.
+                            send(&output,text(json!({"type":"hint","message":"请直接说话，或按下键结束"})))?;
+                            interrupt_hint_sent=true;
+                        }
+                    }
+                    if last_activity.elapsed()>Duration::from_secs(idle_seconds) || started.elapsed()>Duration::from_secs(1800){
+                        send(&output,text(json!({"type":"ended","reason":if started.elapsed()>Duration::from_secs(1800){"limit"}else{"idle"}})))?;
+                        break
+                    }
                 }
             }
         }
@@ -391,6 +471,51 @@ async fn run_session(app: Shared, mut input: mpsc::Receiver<Message>, output: Tx
     result
 }
 
+fn rms_above(bytes: &[u8], threshold: u64) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let energy: u64 = bytes
+        .chunks_exact(2)
+        .map(|s| {
+            let n = i16::from_le_bytes([s[0], s[1]]) as i64;
+            (n * n) as u64
+        })
+        .sum();
+    energy > threshold * threshold * (bytes.len() / 2) as u64
+}
+fn caption(value: &Value) -> Option<Message> {
+    let role = value["role"].as_str()?;
+    if !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    let content = value["text"].as_str()?;
+    let content: String = content.chars().take(180).collect();
+    Some(text(
+        json!({"type":"transcript","role":role,"text":content}),
+    ))
+}
+fn voice_error(error: &anyhow::Error) -> Message {
+    let detail = format!("{error:#}").to_lowercase();
+    let (code, message, retryable) =
+        if detail.contains("login") || detail.contains("unauthorized") || detail.contains("401") {
+            ("account", "服务器账号需要重新登录", false)
+        } else if detail.contains("quota")
+            || detail.contains("rate limit")
+            || detail.contains("usage limit")
+        {
+            ("quota", "订阅用量暂时不可用，请稍后再试", false)
+        } else if detail.contains("queue")
+            || detail.contains("timeout")
+            || detail.contains("disconnected")
+        {
+            ("network", "语音连接中断，正在尝试重连", true)
+        } else {
+            ("service", "语音服务暂不可用，请按 OK 重试", false)
+        };
+    text(json!({"type":"error","code":code,"message":message,"retryable":retryable}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +525,24 @@ mod tests {
         for n in [0, 1, 958, 962, 1920] {
             assert!(!valid_pcm(&vec![0; n]));
         }
+    }
+    #[test]
+    fn captions_are_unicode_bounded_and_ignore_other_roles() {
+        let Some(Message::Text(message)) =
+            caption(&json!({"role":"assistant","text":"语音".repeat(200)}))
+        else {
+            panic!("caption missing")
+        };
+        let value: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(value["text"].as_str().unwrap().chars().count(), 180);
+        assert!(message.len() < 1200);
+        assert!(caption(&json!({"role":"developer","text":"control"})).is_none());
+    }
+    #[test]
+    fn silence_does_not_extend_idle_time() {
+        assert!(!rms_above(&[0; FRAME_BYTES], 600));
+        let voiced: Vec<u8> = (0..480).flat_map(|_| 1200i16.to_le_bytes()).collect();
+        assert!(rms_above(&voiced, 600));
     }
     #[test]
     fn slot_is_released_on_drop() {
