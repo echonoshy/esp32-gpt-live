@@ -7,6 +7,8 @@
 static settings_t prefs = {.volume = 70, .brightness = 65, .screen_seconds = 60,
                           .idle_seconds = 180, .duplex = 1};
 static char title[64];
+static int focus, row_count;
+static char rows[10][64];
 settings_t settings_get(void)
 {
     return prefs;
@@ -32,23 +34,32 @@ void voice_wifi_ip(char *s, size_t n)
 void ui_show_menu(const char *t, const char *const *items, int count, int selected,
                   const char *hint)
 {
-    (void)items;
     assert(selected >= 0 && selected < count);
     assert(strstr(hint, "长按 OK 返回上一级"));
     snprintf(title, sizeof(title), "%s", t);
+    focus = selected;
+    row_count = count;
+    for (int i = 0; i < count; i++) {
+        assert(strcmp(items[i], "结束对话"));
+        snprintf(rows[i], sizeof(rows[i]), "%s", items[i]);
+    }
 }
 int main(void)
 {
     menu_open(false);
+    assert(row_count == 6 && !strcmp(rows[1], "重置上下文"));
     assert(menu_key(0) == MENU_LIVE);
     assert(menu_back() == MENU_CLOSE);
     menu_key(1);
-    menu_key(0); // Conversation
-    menu_key(0); // New chat confirmation
-    assert(!strcmp(title, "清空上下文？"));
-    assert(menu_back() == MENU_NONE && !strcmp(title, "对话管理"));
-    menu_back();
+    assert(menu_key(0) == MENU_NONE); // Entering confirmation must not reset context.
+    assert(!strcmp(title, "重置上下文？"));
+    assert(menu_back() == MENU_NONE && !strcmp(title, "快捷菜单") && focus == 1);
+    menu_key(0);
     menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "快捷菜单")); // Cancel row.
+    menu_key(0);
+    assert(menu_key(0) == MENU_NEW_CHAT); // Only explicit confirmation resets.
+    menu_back();
     menu_key(1);
     menu_key(0); // Root opens voice selection directly.
     assert(!strcmp(title, "选择音色"));
@@ -72,6 +83,23 @@ int main(void)
     menu_key(-1); // Volume +5 saved before returning
     menu_back();
     assert(!strcmp(title, "设备设置") && prefs.volume == 75);
+    for (int i = 0; i < 3; i++)
+        menu_key(1);
+    assert(strstr(rows[focus], "空闲结束"));
+    menu_key(0);
+    menu_key(-1);
+    menu_key(0);
+    assert(!strcmp(title, "设备设置") && focus == 3 && prefs.idle_seconds == 300);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "进入手机设置？"));
+    assert(menu_back() == MENU_NONE && !strcmp(title, "设备设置") && focus == 4);
+    menu_key(0);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "设备设置") && focus == 4);
+    menu_key(0);
+    assert(menu_key(0) == MENU_PHONE); // Maintenance also requires explicit confirmation.
+    menu_refresh();
+    assert(!strcmp(title, "设备设置") && focus == 4); // QR exit returns here.
     menu_back();
     menu_key(1);
     menu_key(1);
@@ -89,5 +117,5 @@ int main(void)
     assert(!strcmp(title, "网络设置"));
     menu_back();
     assert(menu_back() == MENU_CLOSE);
-    puts("PASS: direct voice selection/save/cancel/back, every menu parent, volume retention, root exit");
+    puts("PASS: direct context reset, reset/maintenance confirmation and cancellation, idle setting, voice and menu navigation");
 }

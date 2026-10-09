@@ -7,7 +7,6 @@
 
 typedef enum {
     ROOT,
-    CHAT,
     DEVICE,
     NETWORK,
     PICK_VOICE,
@@ -16,6 +15,7 @@ typedef enum {
     EDIT_SCREEN,
     EDIT_IDLE,
     CONFIRM_NEW,
+    CONFIRM_PHONE,
     CONFIRM_WIFI,
     INFO
 } page_t;
@@ -28,15 +28,14 @@ static int count(void)
 {
     switch (page) {
     case ROOT:
-        return 6;
     case DEVICE:
-    case CHAT:
-        return 5;
+        return 6;
     case NETWORK:
         return 3;
     case PICK_VOICE:
         return VOICE_COUNT + 1;
     case CONFIRM_NEW:
+    case CONFIRM_PHONE:
     case CONFIRM_WIFI:
         return 2;
     default:
@@ -60,28 +59,20 @@ void menu_refresh(void)
     case ROOT:
         snprintf(title, sizeof(title), "快捷菜单");
         snprintf(rows[0], sizeof(rows[0]), "%s畅聊", live_mode ? "退出" : "开启");
-        snprintf(rows[1], sizeof(rows[1]), "对话管理");
+        snprintf(rows[1], sizeof(rows[1]), "重置上下文");
         snprintf(rows[2], sizeof(rows[2]), "音色：%s", settings_voice(p.voice));
         snprintf(rows[3], sizeof(rows[3]), "设备设置");
         snprintf(rows[4], sizeof(rows[4]), "网络设置");
         snprintf(rows[5], sizeof(rows[5]), "返回聊天");
-        break;
-    case CHAT:
-        snprintf(title, sizeof(title), "对话管理");
-        snprintf(rows[0], sizeof(rows[0]), "新对话（清空上下文）");
-        snprintf(rows[1], sizeof(rows[1]), "结束对话");
-        snprintf(rows[2], sizeof(rows[2]), "畅聊：支持随时插话");
-        snprintf(rows[3], sizeof(rows[3]), "空闲结束：%d 秒", p.idle_seconds);
-        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
-        snprintf(hint, sizeof(hint), "切换模式保留上下文");
         break;
     case DEVICE:
         snprintf(title, sizeof(title), "设备设置");
         snprintf(rows[0], sizeof(rows[0]), "音量：%d", p.volume);
         snprintf(rows[1], sizeof(rows[1]), "亮度：%d", p.brightness);
         snprintf(rows[2], sizeof(rows[2]), "自动息屏：%d 秒", p.screen_seconds);
-        snprintf(rows[3], sizeof(rows[3]), "手机设置与固件更新");
-        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
+        snprintf(rows[3], sizeof(rows[3]), "空闲结束：%d 秒", p.idle_seconds);
+        snprintf(rows[4], sizeof(rows[4]), "手机设置与固件更新");
+        snprintf(rows[5], sizeof(rows[5]), "返回上一级");
         break;
     case NETWORK:
         snprintf(title, sizeof(title), "网络设置");
@@ -97,10 +88,16 @@ void menu_refresh(void)
         snprintf(hint, sizeof(hint), "OK 保存，新对话生效");
         break;
     case CONFIRM_NEW:
-        snprintf(title, sizeof(title), "清空上下文？");
-        snprintf(rows[0], sizeof(rows[0]), "确认开启新对话");
+        snprintf(title, sizeof(title), "重置上下文？");
+        snprintf(rows[0], sizeof(rows[0]), "确认清空并新建");
         snprintf(rows[1], sizeof(rows[1]), "返回上一级");
-        snprintf(hint, sizeof(hint), "将结束当前对话");
+        snprintf(hint, sizeof(hint), "原对话内容将清空");
+        break;
+    case CONFIRM_PHONE:
+        snprintf(title, sizeof(title), "进入手机设置？");
+        snprintf(rows[0], sizeof(rows[0]), "确认进入");
+        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
+        snprintf(hint, sizeof(hint), "当前对话将结束并清空");
         break;
     case CONFIRM_WIFI:
         snprintf(title, sizeof(title), "重新配置网络？");
@@ -158,11 +155,17 @@ menu_action_t menu_back(void)
     case EDIT_VOLUME:
     case EDIT_BRIGHT:
     case EDIT_SCREEN:
-        enter(DEVICE);
-        break;
     case EDIT_IDLE:
+        selected = page - EDIT_VOLUME;
+        page = DEVICE;
+        break;
     case CONFIRM_NEW:
-        enter(CHAT);
+        enter(ROOT);
+        selected = 1;
+        break;
+    case CONFIRM_PHONE:
+        enter(DEVICE);
+        selected = 4;
         break;
     case CONFIRM_WIFI:
     case INFO:
@@ -216,27 +219,15 @@ menu_action_t menu_key(int key)
                 return MENU_LIVE;
             if (selected == 5)
                 return MENU_CLOSE;
-            enter((page_t[]){CHAT, PICK_VOICE, DEVICE, NETWORK}[selected - 1]);
+            enter((page_t[]){CONFIRM_NEW, PICK_VOICE, DEVICE, NETWORK}[selected - 1]);
             if (page == PICK_VOICE)
                 selected = p.voice;
             break;
-        case CHAT:
-            if (selected == 0)
-                enter(CONFIRM_NEW);
-            else if (selected == 1)
-                return MENU_STOP;
-            else if (selected == 2) {
-                // Informational: live capture is never gated by playback.
-            } else if (selected == 3)
-                enter(EDIT_IDLE);
-            else
-                enter(ROOT);
-            break;
         case DEVICE:
-            if (selected < 3)
-                enter((page_t[]){EDIT_VOLUME, EDIT_BRIGHT, EDIT_SCREEN}[selected]);
-            else if (selected == 3)
-                return MENU_PHONE;
+            if (selected < 4)
+                enter((page_t[]){EDIT_VOLUME, EDIT_BRIGHT, EDIT_SCREEN, EDIT_IDLE}[selected]);
+            else if (selected == 4)
+                enter(CONFIRM_PHONE);
             else
                 enter(ROOT);
             break;
@@ -254,8 +245,14 @@ menu_action_t menu_key(int key)
         case CONFIRM_NEW:
             if (selected == 0)
                 return MENU_NEW_CHAT;
-            enter(CHAT);
-            break;
+            return menu_back();
+        case CONFIRM_PHONE:
+            if (selected == 0) {
+                enter(DEVICE);
+                selected = 4;
+                return MENU_PHONE;
+            }
+            return menu_back();
         case CONFIRM_WIFI:
             if (selected == 0)
                 return MENU_WIFI;
@@ -264,12 +261,8 @@ menu_action_t menu_key(int key)
         case INFO:
             enter(NETWORK);
             break;
-        case EDIT_IDLE:
-            enter(CHAT);
-            break;
         default:
-            enter(DEVICE);
-            break;
+            return menu_back();
         }
     if (changed && settings_save(p) != ESP_OK) {
         const char *message[] = {"设置保存失败", "请按 OK 重试"};

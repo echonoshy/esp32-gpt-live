@@ -5,7 +5,6 @@ typedef enum {
     MENU_CLOSE,
     MENU_LIVE,
     MENU_NEW_CHAT,
-    MENU_STOP,
     MENU_WIFI,
     MENU_PHONE
 } menu_action_t;

@@ -669,9 +669,6 @@ static void command_task(void *unused)
                 ui_set("NEW CONVERSATION", "正在清空上一段对话");
                 if (!atomic_load(&connected))
                     enqueue(CMD_NEW_START, 0);
-            } else if (action == MENU_STOP) {
-                stop_session();
-                close_menu();
             } else if (action == MENU_WIFI) {
                 stop_session();
                 atomic_store(&menu_active, false);
@@ -679,14 +676,18 @@ static void command_task(void *unused)
                 if (voice_wifi_request_setup() != ESP_OK)
                     ui_set("SETUP UNAVAILABLE", "请重启设备后再试");
             } else if (action == MENU_PHONE) {
-                if (device_busy()) {
-                    menu_notice = true;
-                    const char *items[] = {"请先结束当前对话", "对话管理 > 结束对话"};
-                    ui_show_menu("手机设置", items, 2, 0, "短按或长按 OK 返回");
-                } else if (voice_wifi_connected()) {
+                if (voice_wifi_connected()) {
+                    // The menu explicitly confirms ending the conversation before maintenance.
+                    atomic_store(&restart_pending, false);
+                    if (device_busy())
+                        stop_session();
                     atomic_store(&menu_active, false);
                     settings_open = true;
                     portal_arm();
+                } else {
+                    menu_notice = true;
+                    const char *items[] = {"请先连接无线网络", "网络设置 > 扫码连接"};
+                    ui_show_menu("手机设置", items, 2, 0, "短按或长按 OK 返回");
                 }
             }
             continue;

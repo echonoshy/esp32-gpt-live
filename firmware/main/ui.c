@@ -57,7 +57,7 @@ static const char *state_text(const char *state)
         {"WI-FI RECONNECTING", "正在重连网络"},
         {"WI-FI SAVED", "网络已保存"},
         {"CONNECTING WI-FI", "正在连接网络"},
-        {"END CHAT FIRST", "请先结束对话"},
+        {"SETTINGS UNAVAILABLE", "设置暂不可用"},
         {"UPDATING", "正在更新固件"},
         {"UPDATE FAILED", "更新失败"},
         {"UPDATE COMPLETE", "更新完成"},

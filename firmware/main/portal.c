@@ -29,7 +29,7 @@ bool portal_updating(void)
 void portal_arm(void)
 {
     if (device_busy() || portal_updating()) {
-        ui_set("END CHAT FIRST", "菜单 > 对话管理 > 结束");
+        ui_set("SETTINGS UNAVAILABLE", "请重新进入手机设置");
         return;
     }
     atomic_store(&armed_until, esp_timer_get_time() / 1000000 + 300);
@@ -140,7 +140,7 @@ static esp_err_t netcheck(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "Refresh settings first");
     if (device_busy() || portal_updating())
-        return error(r, "409 Conflict", "End the current conversation first");
+        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
     device_netcheck();
     return error(r, "200 OK", "12 second silent network check queued; no microphone or GPT");
 }
@@ -154,7 +154,7 @@ static esp_err_t wifi(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     if (device_busy())
-        return error(r, "409 Conflict", "请先在「对话管理」中选择「结束对话」");
+        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
     cJSON *j = read_json(r), *ssid = cJSON_GetObjectItem(j, "ssid"),
           *password = cJSON_GetObjectItem(j, "password");
     esp_err_t e = cJSON_IsString(ssid) && cJSON_IsString(password)
@@ -179,7 +179,7 @@ static esp_err_t update(httpd_req_t *r)
     atomic_store(&updating, true);
     if (device_busy()) {
         atomic_store(&updating, false);
-        return error(r, "409 Conflict", "请先在「对话管理」中选择「结束对话」");
+        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
     }
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     if (!slot || r->content_len < 1024 || r->content_len > slot->size) {
