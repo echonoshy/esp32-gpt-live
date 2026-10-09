@@ -76,9 +76,6 @@ static esp_err_t info(httpd_req_t *r)
     cJSON_AddNumberToObject(j, "idle_seconds", p.idle_seconds);
     cJSON_AddNumberToObject(j, "mode", p.mode);
     cJSON_AddNumberToObject(j, "voice", p.voice);
-    cJSON_AddNumberToObject(j, "pace", p.pace);
-    cJSON_AddNumberToObject(j, "reply_length", p.reply_length);
-    cJSON_AddNumberToObject(j, "language", p.language);
     cJSON_AddNumberToObject(j, "duplex", p.duplex);
     device_add_diagnostics(j);
     char *s = cJSON_PrintUnformatted(j);
@@ -123,18 +120,20 @@ static esp_err_t save(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     cJSON *j = read_json(r);
-    settings_t p = {integer(j, "volume"),         integer(j, "brightness"),
-                    integer(j, "screen_seconds"), integer(j, "idle_seconds"),
-                    integer(j, "mode"),           integer(j, "voice"),
-                    integer(j, "pace"),           integer(j, "reply_length"),
-                    integer(j, "language"),       integer(j, "duplex")};
+    settings_t p = {.volume = integer(j, "volume"),
+                    .brightness = integer(j, "brightness"),
+                    .screen_seconds = integer(j, "screen_seconds"),
+                    .idle_seconds = integer(j, "idle_seconds"),
+                    .mode = integer(j, "mode"),
+                    .voice = integer(j, "voice"),
+                    .duplex = 1};
     cJSON_Delete(j);
     esp_err_t e = settings_save(p);
     if (e != ESP_OK)
         return error(r, e == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error",
                      "保存失败，请检查设置后重试");
     device_apply_settings();
-    return error(r, "200 OK", "设置已保存；音色、说话风格和超时将在新对话生效");
+    return error(r, "200 OK", "设置已保存；音色和超时将在新对话生效");
 }
 static esp_err_t netcheck(httpd_req_t *r)
 {

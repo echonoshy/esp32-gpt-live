@@ -154,7 +154,8 @@ impl Codex {
         sdp: &str,
         prefs: &crate::preferences::Preferences,
     ) -> Result<()> {
-        let prompt = prefs.prompt();
+        // Runtime capabilities only; conversational style comes from the user's speech.
+        let prompt = "这是一个语音对话终端。等待用户开口，不主动开场。设备仅提供语音输入输出，不提供文件操作、命令执行、工具调用、长期记忆或提醒功能。";
         let response = self.rpc("thread/start",json!({"cwd":self._directory.path(),"ephemeral":true,"approvalPolicy":"never","sandbox":"read-only","environments":[],"baseInstructions":prompt,"developerInstructions":prompt})).await?;
         let thread = response["thread"]["id"]
             .as_str()

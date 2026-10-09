@@ -8,7 +8,6 @@
 typedef enum {
     ROOT,
     CHAT,
-    VOICE,
     DEVICE,
     NETWORK,
     PICK_VOICE,
@@ -23,9 +22,6 @@ typedef enum {
 static page_t page;
 static int selected;
 static bool live_mode;
-static const char *const pace[] = {"自然", "舒缓", "较快"};
-static const char *const length[] = {"简短", "一句话", "详细"};
-static const char *const language[] = {"中文", "英文", "跟随说话"};
 static const int sleeps[] = {15, 30, 60, 120, 300, 600};
 static const int timeouts[] = {60, 180, 300, 600, 900};
 static int count(void)
@@ -33,7 +29,6 @@ static int count(void)
     switch (page) {
     case ROOT:
         return 6;
-    case VOICE:
     case DEVICE:
     case CHAT:
         return 5;
@@ -66,7 +61,7 @@ void menu_refresh(void)
         snprintf(title, sizeof(title), "快捷菜单");
         snprintf(rows[0], sizeof(rows[0]), "%s畅聊", live_mode ? "退出" : "开启");
         snprintf(rows[1], sizeof(rows[1]), "对话管理");
-        snprintf(rows[2], sizeof(rows[2]), "音色与风格");
+        snprintf(rows[2], sizeof(rows[2]), "音色：%s", settings_voice(p.voice));
         snprintf(rows[3], sizeof(rows[3]), "设备设置");
         snprintf(rows[4], sizeof(rows[4]), "网络设置");
         snprintf(rows[5], sizeof(rows[5]), "返回聊天");
@@ -79,15 +74,6 @@ void menu_refresh(void)
         snprintf(rows[3], sizeof(rows[3]), "空闲结束：%d 秒", p.idle_seconds);
         snprintf(rows[4], sizeof(rows[4]), "返回上一级");
         snprintf(hint, sizeof(hint), "切换模式保留上下文");
-        break;
-    case VOICE:
-        snprintf(title, sizeof(title), "音色与风格");
-        snprintf(rows[0], sizeof(rows[0]), "音色：%s", settings_voice(p.voice));
-        snprintf(rows[1], sizeof(rows[1]), "语速：%s", pace[p.pace]);
-        snprintf(rows[2], sizeof(rows[2]), "回复：%s", length[p.reply_length]);
-        snprintf(rows[3], sizeof(rows[3]), "语言：%s", language[p.language]);
-        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
-        snprintf(hint, sizeof(hint), "新对话生效");
         break;
     case DEVICE:
         snprintf(title, sizeof(title), "设备设置");
@@ -166,7 +152,8 @@ menu_action_t menu_back(void)
     case ROOT:
         return MENU_CLOSE;
     case PICK_VOICE:
-        enter(VOICE);
+        enter(ROOT);
+        selected = 2;
         break;
     case EDIT_VOLUME:
     case EDIT_BRIGHT:
@@ -229,7 +216,9 @@ menu_action_t menu_key(int key)
                 return MENU_LIVE;
             if (selected == 5)
                 return MENU_CLOSE;
-            enter((page_t[]){CHAT, VOICE, DEVICE, NETWORK}[selected - 1]);
+            enter((page_t[]){CHAT, PICK_VOICE, DEVICE, NETWORK}[selected - 1]);
+            if (page == PICK_VOICE)
+                selected = p.voice;
             break;
         case CHAT:
             if (selected == 0)
@@ -241,22 +230,6 @@ menu_action_t menu_key(int key)
             } else if (selected == 3)
                 enter(EDIT_IDLE);
             else
-                enter(ROOT);
-            break;
-        case VOICE:
-            if (selected == 0) {
-                enter(PICK_VOICE);
-                selected = p.voice;
-            } else if (selected == 1) {
-                p.pace = (p.pace + 1) % 3;
-                changed = true;
-            } else if (selected == 2) {
-                p.reply_length = (p.reply_length + 1) % 3;
-                changed = true;
-            } else if (selected == 3) {
-                p.language = (p.language + 1) % 3;
-                changed = true;
-            } else
                 enter(ROOT);
             break;
         case DEVICE:
@@ -275,7 +248,8 @@ menu_action_t menu_key(int key)
                 p.voice = selected;
                 changed = true;
             }
-            enter(VOICE);
+            enter(ROOT);
+            selected = 2;
             break;
         case CONFIRM_NEW:
             if (selected == 0)

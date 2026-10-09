@@ -35,6 +35,7 @@ def codex():
         if method == "account/read":
             result = {"account": {"type": "chatgpt", "planType": "test"}}
         elif method == "thread/start":
+            log("thread_config", base=params.get("baseInstructions"), developer=params.get("developerInstructions"))
             result = {"thread": {"id": str(uuid.uuid4())}}
         elif method == "thread/realtime/appendText":
             log("interrupt", thread=params["threadId"])
@@ -144,7 +145,8 @@ async def check():
                     async with asyncio.timeout(5):
                         while not predicate():
                             await asyncio.sleep(0.02)
-                await send("start", protocol=3, mode="ptt", voice="juniper", language=1)
+                # Old firmware may still send these fields; none may impose conversation style.
+                await send("start", protocol=3, mode="ptt", voice="juniper", language=1, pace=2, reply_length=1)
                 await send("ptt_start")
                 for _ in range(15):
                     await ws.send(struct.pack("<h", 1200) * 480)
@@ -157,7 +159,9 @@ async def check():
                 await until(lambda: any(isinstance(m, bytes) for m in messages))
                 assert all(len(m) == 964 for m in messages if isinstance(m, bytes))
                 assert events("session")[0]["voice"] == "juniper"
-                assert "自然英语" in events("session")[0]["prompt"]
+                prompt = events("session")[0]["prompt"]
+                assert all(s not in prompt for s in ("普通话", "自然英语", "语速", "一句话", "简短回答"))
+                assert events("thread_config")[0] == {"kind": "thread_config", "base": prompt, "developer": prompt}
                 # New chat requires a stop acknowledgement and a fresh Codex thread.
                 await send("stop")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
@@ -166,6 +170,8 @@ async def check():
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "listen" for m in messages))
                 sessions = events("session")
                 assert len(sessions) == 2 and sessions[0]["thread"] != sessions[1]["thread"]
+                assert sessions[0]["prompt"] == sessions[1]["prompt"], "retired style fields changed instructions"
+                assert sessions[1]["voice"] == "cove"
                 count=len(events("audio"))
                 for _ in range(10):
                     await ws.send(struct.pack("<h", 1200) * 480)

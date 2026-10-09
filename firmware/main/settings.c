@@ -4,7 +4,8 @@
 #include "freertos/semphr.h"
 #include <assert.h>
 #include <stdbool.h>
-static settings_t prefs = {70, 65, 60, 180, 0, 0, 0, 0, 0, 1};
+static settings_t prefs = {.volume = 70, .brightness = 65, .screen_seconds = 60,
+                          .idle_seconds = 180, .duplex = 1};
 static const char *voices[VOICE_COUNT] = {"cove", "juniper", "maple", "spruce", "ember",
                                           "vale", "breeze",  "arbor", "sol"};
 const char *settings_voice(int i)
@@ -17,9 +18,7 @@ static bool valid(settings_t p)
     return p.volume >= 0 && p.volume <= 100 && p.brightness >= 5 && p.brightness <= 100 &&
            p.screen_seconds >= 15 && p.screen_seconds <= 600 && p.idle_seconds >= 30 &&
            p.idle_seconds <= 900 && p.mode >= 0 && p.mode <= 1 && p.voice >= 0 &&
-           p.voice < VOICE_COUNT && p.pace >= 0 && p.pace <= 2 && p.reply_length >= 0 &&
-           p.reply_length <= 2 && p.language >= 0 && p.language <= 2 && p.duplex >= 0 &&
-           p.duplex <= 1;
+           p.voice < VOICE_COUNT && p.duplex >= 0 && p.duplex <= 1;
 }
 void settings_init(void)
 {
@@ -59,6 +58,7 @@ void settings_init(void)
     if (loaded)
         prefs = saved;
     nvs_close(n);
+    prefs.reserved_style[0] = prefs.reserved_style[1] = prefs.reserved_style[2] = 0;
     prefs.duplex = 1;
 }
 settings_t settings_get(void)
@@ -71,6 +71,7 @@ settings_t settings_get(void)
 esp_err_t settings_save(settings_t p)
 {
     p.duplex = 1; // Retired NVS field; live is always full duplex.
+    p.reserved_style[0] = p.reserved_style[1] = p.reserved_style[2] = 0;
     if (!valid(p))
         return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(lock, portMAX_DELAY);

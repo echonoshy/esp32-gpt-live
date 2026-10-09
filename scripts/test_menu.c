@@ -4,7 +4,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-static settings_t prefs = {70, 65, 60, 180, 0, 0, 0, 0, 0, 0};
+static settings_t prefs = {.volume = 70, .brightness = 65, .screen_seconds = 60,
+                          .idle_seconds = 180, .duplex = 1};
 static char title[64];
 settings_t settings_get(void)
 {
@@ -49,14 +50,22 @@ int main(void)
     menu_back();
     menu_key(1);
     menu_key(1);
-    menu_key(0);
-    menu_key(0); // Voice > Choose voice
+    menu_key(0); // Root opens voice selection directly.
     assert(!strcmp(title, "选择音色"));
-    menu_back();
-    assert(!strcmp(title, "音色与风格"));
-    menu_back();
     menu_key(1);
+    menu_key(0); // Save the selected voice and return to root.
+    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
+    menu_key(0); // Focus stays on voice; reopen at the saved choice.
+    assert(!strcmp(title, "选择音色"));
     menu_key(1);
+    menu_back();
+    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
+    // The explicit back row also returns to root without changing the voice.
+    menu_key(0);
+    menu_key(-1);
+    menu_key(-1);
+    menu_key(0);
+    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
     menu_key(1);
     menu_key(0); // Device
     menu_key(0);
@@ -80,5 +89,5 @@ int main(void)
     assert(!strcmp(title, "网络设置"));
     menu_back();
     assert(menu_back() == MENU_CLOSE);
-    puts("PASS: every menu parent, confirmation back, volume retention, root exit");
+    puts("PASS: direct voice selection/save/cancel/back, every menu parent, volume retention, root exit");
 }

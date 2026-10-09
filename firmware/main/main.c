@@ -555,10 +555,9 @@ static void start_session(void)
     atomic_store(&started_at, now_ms());
     char start[320];
     snprintf(start, sizeof(start),
-             "{\"type\":\"start\",\"protocol\":7,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
-             "\"reply_length\":%d,\"language\":%d,\"duplex\":%d,\"idle_seconds\":%d}",
-             live ? "continuous" : "ptt", settings_voice(p.voice), p.pace, p.reply_length,
-             p.language, 1, p.idle_seconds);
+             "{\"type\":\"start\",\"protocol\":7,\"mode\":\"%s\",\"voice\":\"%s\","
+             "\"duplex\":1,\"idle_seconds\":%d}",
+             live ? "continuous" : "ptt", settings_voice(p.voice), p.idle_seconds);
     if (!send_json(start))
         retry();
     else
