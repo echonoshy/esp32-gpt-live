@@ -1,0 +1,66 @@
+<!doctype html><meta charset="utf-8"><title>mic-on media worker</title>
+<script>
+'use strict';
+const ws = new WebSocket(`ws://${location.host}/worker?id=${encodeURIComponent(location.hash.slice(1))}`);
+ws.binaryType = 'arraybuffer';
+let ctx, pc, input, capture, channel, inputEnabled = false, started = false;
+const report = value => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); };
+const fail = error => report({type:'error', message:String(error)});
+ws.onopen = async () => {
+  try {
+    ctx = new AudioContext({sampleRate:24000});
+    await ctx.audioWorklet.addModule('/worklet.js');
+    await ctx.resume();
+    input = new AudioWorkletNode(ctx,'pcm-input');
+    input.port.onmessage=({data})=>report({type:'media_stats',...data,output_ws_bytes:ws.bufferedAmount});
+    const destination = ctx.createMediaStreamDestination();
+    input.connect(destination);
+    // Keep the source clock running even when no device audio arrives.
+    const mute = ctx.createGain(); mute.gain.value=0; input.connect(mute).connect(ctx.destination);
+    pc = new RTCPeerConnection({iceServers:[],bundlePolicy:'max-bundle'});
+    pc.addTrack(destination.stream.getAudioTracks()[0],destination.stream);
+    pc.onconnectionstatechange = () => {if (['failed','closed'].includes(pc.connectionState)) fail(pc.connectionState);};
+    pc.ontrack = event => {
+      const stream = event.streams[0] || new MediaStream([event.track]);
+      const player = document.createElement('audio');
+      player.srcObject=stream;player.autoplay=true;player.muted=true;document.body.append(player);
+      player.play().catch(fail);
+      capture = new AudioWorkletNode(ctx,'pcm-output');
+      capture.port.onmessage = ({data}) => {
+        if (!started || ws.readyState!==WebSocket.OPEN) return;
+        if (ws.bufferedAmount>24000) {fail('output audio backpressure');ws.close();return;}
+        ws.send(data);
+      };
+      ctx.createMediaStreamSource(stream).connect(capture).connect(mute);
+    };
+    channel=pc.createDataChannel('oai-events');
+    channel.onopen=()=>{started=true;report({type:'ready'});};
+    channel.onmessage=({data})=>{
+      try {
+        const event=JSON.parse(data);
+        // This v3 subscription channel is not the public Realtime event schema.
+        if(event.type==='input_transcript.added' || event.type==='output_transcript.added')
+          report({type:'transcript_delta',role:event.type==='input_transcript.added'?'user':'assistant',text:event.item?.text||''});
+        if(event.type==='error') fail('upstream voice error');
+        if (event.type==='turn.done' && typeof event.turn?.transcript==='string') report({type:'transcript',role:event.turn.role,text:event.turn.transcript});
+      } catch(error){fail(error);}
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    if(pc.iceGatheringState!=='complete') await new Promise(resolve=>{
+      const timer=setTimeout(resolve,5000);
+      pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete'){clearTimeout(timer);resolve();}});
+    });
+    report({type:'offer',sdp:pc.localDescription.sdp});
+  } catch(error){fail(error);}
+};
+ws.onmessage=async({data})=>{
+  try {
+    if(data instanceof ArrayBuffer){if(inputEnabled)input.port.postMessage(data,[data]);return;}
+    const event=JSON.parse(data);
+    if(event.type==='answer') await pc.setRemoteDescription({type:'answer',sdp:event.sdp});
+    if(event.type==='input'){inputEnabled=Boolean(event.enabled);if(event.clear)input.port.postMessage('clear');}
+  } catch(error){fail(error);}
+};
+ws.onclose=()=>{pc?.close();ctx?.close();};
+window.onunhandledrejection=event=>fail(event.reason);
+</script>

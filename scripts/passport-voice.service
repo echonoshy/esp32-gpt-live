@@ -1,0 +1,17 @@
+[Unit]
+Description=mic-on realtime voice bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspaces/mic-on
+EnvironmentFile=%h/workspaces/mic-on/.env
+ExecStart=%h/workspaces/mic-on/target/release/passport-voice
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
