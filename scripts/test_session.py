@@ -259,10 +259,50 @@ async def check():
                 await until(lambda: any(isinstance(m, bytes) for m in messages))
                 await send("stop")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
+                # Compressed wire format still reaches the media worker as 960-byte PCM.
+                vectors = json.loads((ROOT / 'scripts/fixtures/adpcm.json').read_text())
+                packet = bytes.fromhex(vectors[1]['encoded'])
+                messages.clear()
+                count = len(events('audio'))
+                await send('start', protocol=5, mode='ptt')
+                await until(lambda: any(isinstance(m, dict) and m.get('state') == 'ready' for m in messages))
+                await send('ptt_start')
+                for _ in range(24):
+                    await ws.send(packet)
+                    await asyncio.sleep(0.02)
+                await until(lambda: len(events('audio')) == count + 24)
+                assert not any(isinstance(m, bytes) for m in messages)
+                assert all(e['enabled'] and e['size'] == 960 for e in events('audio')[count:])
+                await send('ptt_end')
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                assert all(len(m) == 248 and m[6] <= 88 and m[7] == 0 for m in messages if isinstance(m, bytes))
+                await send('stop')
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                # A silent probe must never create a Codex or media session.
+                sessions_before_probe = len(events('session'))
+                messages.clear()
+                await send('probe', protocol=5)
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                for _ in range(10):
+                    await ws.send(bytes(244))
+                    await asyncio.sleep(0.02)
+                assert len(events('session')) == sessions_before_probe
+                assert all(len(m) == 248 for m in messages if isinstance(m, bytes))
+                await send('stop')
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                # Late microphone frames after shutdown must not close the bridge.
+                for _ in range(8):
+                    await ws.send(bytes(244))
+                messages.clear()
+                await send('probe', protocol=5)
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                await send('stop')
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
                 await ws.close()
                 await reader
                 print("PASS: startup capture and early release, release-only model input, tagged playback, voice/prompt, fresh conversation, full-duplex barge-in, menu pause/resume, idle stop acknowledgement")
                 print(f"PASS: streaming PTT input, held-output gate, all 12 reply frames preserved, buffered first audio {first_audio_ms} ms (offline only), mode switch preserves context, live-to-PTT startup queue")
+                print('PASS: compressed 244/248-byte wire with PCM media compatibility, silent transport probe creates no upstream session')
         finally:
             process.terminate()
             try:

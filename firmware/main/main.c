@@ -9,6 +9,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "esp_transport_tcp.h"
 #include "lwip/sockets.h"
@@ -28,6 +30,8 @@
 #include "device.h"
 #include "menu.h"
 #include "controls.h"
+#include "adpcm.h"
+#include "ws_send.h"
 
 #define SAMPLES 480
 #define FRAME_BYTES (SAMPLES * sizeof(int16_t))
@@ -55,7 +59,9 @@ typedef enum {
     CMD_MENU_BACK,
     CMD_PTT_BEGIN,
     CMD_PTT_END,
-    CMD_NEW_START
+    CMD_NEW_START,
+    CMD_NETCHECK,
+    CMD_NETCHECK_DONE
 } command_type_t;
 typedef struct {
     command_type_t type;
@@ -74,7 +80,8 @@ static bool menu_notice;
 static atomic_bool capture_pending, accept_requested;
 static atomic_uint released_at;
 static atomic_bool output_timing_pending;
-static int16_t preroll[PREROLL_FRAMES][SAMPLES];
+static uint8_t preroll[PREROLL_FRAMES][ADPCM_BYTES];
+static adpcm_state_t input_codec;
 static unsigned preroll_count;   // Protected by send_lock.
 static unsigned captured_frames; // Protected by send_lock; includes the pre-roll.
 static atomic_bool menu_active, live_mode, full_duplex, session_full_duplex, ptt_held,
@@ -83,6 +90,33 @@ static atomic_uint capture_started;
 static atomic_uint epoch, mic_frames, speaker_frames, dropped_frames, playback_refills;
 static atomic_int battery = -1, attempts;
 static atomic_uint listen_after, retry_at, started_at, ready_at, last_output_at;
+static atomic_bool netcheck;
+static atomic_uint alloc_failures, alloc_failed_size, send_max_ms, send_slow, send_errors;
+static atomic_uint mic_read_max_ms, mic_read_errors, receive_gap_max_ms, receive_last_ms;
+static atomic_uint netcheck_runs;
+static atomic_uint wifi_disconnects, wifi_last_reason;
+static void wifi_diagnostic(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)id;
+    const wifi_event_sta_disconnected_t *event = data;
+    atomic_fetch_add(&wifi_disconnects, 1);
+    atomic_store(&wifi_last_reason, event->reason);
+}
+static void allocation_failed(size_t size, uint32_t caps, const char *function)
+{
+    (void)caps;
+    (void)function;
+    atomic_fetch_add(&alloc_failures, 1);
+    atomic_store(&alloc_failed_size, size);
+}
+static void maximum(atomic_uint *value, uint32_t candidate)
+{
+    uint32_t previous = atomic_load(value);
+    while (candidate > previous && !atomic_compare_exchange_weak(value, &previous, candidate)) {
+    }
+}
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
@@ -108,6 +142,8 @@ int device_battery(void)
 }
 const char *device_state(void)
 {
+    if (atomic_load(&netcheck))
+        return "NETWORK CHECK";
     if (portal_updating())
         return "UPDATING";
     if (!atomic_load(&connected))
@@ -128,6 +164,55 @@ const char *device_state(void)
 void device_apply_settings(void)
 {
     enqueue(CMD_APPLY, 0);
+}
+void device_netcheck(void)
+{
+    enqueue(CMD_NETCHECK, 0);
+}
+void device_add_diagnostics(cJSON *root)
+{
+    cJSON *j = cJSON_AddObjectToObject(root, "diagnostics");
+    if (!j)
+        return;
+    cJSON_AddStringToObject(j, "codec", "ima-adpcm");
+    cJSON_AddNumberToObject(j, "wire_frame_bytes", ADPCM_BYTES);
+    cJSON_AddNumberToObject(j, "heap_free", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(j, "heap_min", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(j, "heap_largest", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(j, "alloc_failures", atomic_load(&alloc_failures));
+    cJSON_AddNumberToObject(j, "alloc_failed_size", atomic_load(&alloc_failed_size));
+    cJSON_AddNumberToObject(j, "send_max_ms", atomic_load(&send_max_ms));
+    cJSON_AddNumberToObject(j, "send_slow", atomic_load(&send_slow));
+    cJSON_AddNumberToObject(j, "send_errors", atomic_load(&send_errors));
+    cJSON_AddNumberToObject(j, "mic_read_max_ms", atomic_load(&mic_read_max_ms));
+    cJSON_AddNumberToObject(j, "mic_read_errors", atomic_load(&mic_read_errors));
+    cJSON_AddNumberToObject(j, "receive_gap_max_ms", atomic_load(&receive_gap_max_ms));
+    cJSON_AddNumberToObject(j, "tx_frames", atomic_load(&mic_frames));
+    cJSON_AddNumberToObject(j, "speaker_frames", atomic_load(&speaker_frames));
+    cJSON_AddNumberToObject(j, "dropped_frames", atomic_load(&dropped_frames));
+    cJSON_AddNumberToObject(j, "playback_refills", atomic_load(&playback_refills));
+    cJSON_AddNumberToObject(j, "playback_queued", uxQueueMessagesWaiting(playback));
+    cJSON_AddBoolToObject(j, "netcheck", atomic_load(&netcheck));
+    cJSON_AddNumberToObject(j, "netcheck_runs", atomic_load(&netcheck_runs));
+    cJSON_AddNumberToObject(j, "wifi_disconnects", atomic_load(&wifi_disconnects));
+    cJSON_AddNumberToObject(j, "wifi_last_reason", atomic_load(&wifi_last_reason));
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+        cJSON_AddNumberToObject(j, "wifi_rssi", ap.rssi);
+}
+// Call only while holding send_lock. Diagnostics cover both pre-roll and normal audio.
+static int send_wire(const uint8_t *packet)
+{
+    uint32_t before = now_ms();
+    int sent =
+        esp_websocket_client_send_bin(ws, (const char *)packet, ADPCM_BYTES, pdMS_TO_TICKS(1000));
+    uint32_t elapsed = now_ms() - before;
+    maximum(&send_max_ms, elapsed);
+    if (elapsed > 40)
+        atomic_fetch_add(&send_slow, 1);
+    if (sent != ADPCM_BYTES)
+        atomic_fetch_add(&send_errors, 1);
+    return sent;
 }
 static bool send_json(const char *message)
 {
@@ -221,18 +306,24 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         received += frame->data_len;
         if (received != frame->payload_len)
             return;
-        if (opcode == 2 && received == FRAME_BYTES + 4) {
+        if (opcode == 2 && received == ADPCM_BYTES + 4) {
+            uint32_t now = now_ms(), previous = atomic_exchange(&receive_last_ms, now);
+            if (previous)
+                maximum(&receive_gap_max_ms, now - previous);
             uint32_t e;
             memcpy(&e, payload, 4);
             if (e != atomic_load(&epoch) || !atomic_load(&ready) ||
                 (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
                 atomic_load(&awaiting_clear))
                 return;
-            if (xQueueSend(playback, payload, 0) != pdTRUE) {
+            audio_frame_t decoded = {.epoch = e};
+            if (!adpcm_decode((const uint8_t *)payload + 4, ADPCM_BYTES, decoded.samples))
+                return;
+            if (xQueueSend(playback, &decoded, 0) != pdTRUE) {
                 audio_frame_t discarded;
                 xQueueReceive(playback, &discarded, 0);
                 atomic_fetch_add(&dropped_frames, 1);
-                xQueueSend(playback, payload, 0);
+                xQueueSend(playback, &decoded, 0);
             }
         } else if (opcode == 1) {
             payload[received] = 0;
@@ -277,6 +368,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&recording, atomic_load(&full_duplex) && !atomic_load(&menu_active));
                 atomic_store(&end_pending, false);
                 atomic_store(&epoch, e);
+                atomic_store(&receive_last_ms, 0);
                 ui_set("SPEAKING", "Hold OK: talk  UP: settings");
             } else if (!strcmp(type, "playback_end") && atomic_load(&ready) &&
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
@@ -303,6 +395,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
             } else if (!strcmp(type, "submitted")) {
                 if (!atomic_load(&ptt_held))
                     ui_set("THINKING", "Waiting for reply...");
+            } else if (!strcmp(type, "probe_done")) {
+                atomic_store(&wanted, false);
+                atomic_store(&recording, false);
+                enqueue(CMD_NETCHECK_DONE, 0);
             } else if (!strcmp(type, "error")) {
                 cJSON *again = cJSON_GetObjectItem(m, "retryable"),
                       *message = cJSON_GetObjectItem(m, "code");
@@ -398,7 +494,7 @@ static void start_session(void)
     atomic_store(&started_at, now_ms());
     char start[320];
     snprintf(start, sizeof(start),
-             "{\"type\":\"start\",\"protocol\":4,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
+             "{\"type\":\"start\",\"protocol\":5,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
              "\"reply_length\":%d,\"language\":%d,\"duplex\":%d,\"idle_seconds\":%d}",
              live ? "continuous" : "ptt", settings_voice(p.voice), p.pace, p.reply_length,
              p.language, p.duplex, p.idle_seconds);
@@ -440,6 +536,34 @@ static void command_task(void *unused)
             ui_wake();
         if (portal_updating() || c.type == CMD_WAKE)
             continue;
+        if (c.type == CMD_NETCHECK) {
+            if (device_busy() || !atomic_load(&connected))
+                continue;
+            xSemaphoreTake(send_lock, portMAX_DELAY);
+            input_codec = (adpcm_state_t){0};
+            atomic_store(&netcheck, true);
+            xSemaphoreGive(send_lock);
+            atomic_store(&wanted, true);
+            atomic_store(&starting, true);
+            atomic_store(&started_at, now_ms());
+            atomic_store(&live_mode, true);
+            atomic_store(&full_duplex, true);
+            atomic_store(&receive_last_ms, 0);
+            atomic_fetch_add(&netcheck_runs, 1);
+            send_json("{\"type\":\"probe\",\"protocol\":5}");
+            continue;
+        }
+        if (c.type == CMD_NETCHECK_DONE ||
+            (atomic_load(&netcheck) && c.type != CMD_DRAIN && c.type != CMD_APPLY)) {
+            stop_session();
+            xSemaphoreTake(send_lock, portMAX_DELAY);
+            atomic_store(&netcheck, false);
+            atomic_store(&live_mode, false);
+            atomic_store(&full_duplex, false);
+            xSemaphoreGive(send_lock);
+            show_home();
+            continue;
+        }
         if (voice_wifi_provisioning()) {
             if (c.type == CMD_OK || c.type == CMD_UP || c.type == CMD_DOWN)
                 voice_wifi_setup_next();
@@ -525,6 +649,7 @@ static void command_task(void *unused)
             xSemaphoreTake(send_lock, portMAX_DELAY);
             preroll_count = 0;
             captured_frames = 0;
+            input_codec = (adpcm_state_t){0};
             atomic_store(&capture_started, now_ms());
             atomic_store(&accept_requested, false);
             atomic_store(&capture_pending, true);
@@ -551,8 +676,7 @@ static void command_task(void *unused)
                 xSemaphoreTake(send_lock, portMAX_DELAY);
                 bool ok = true;
                 for (unsigned i = 0; i < preroll_count && ok; i++) {
-                    ok = esp_websocket_client_send_bin(ws, (const char *)preroll[i], FRAME_BYTES,
-                                                       pdMS_TO_TICKS(1000)) == FRAME_BYTES;
+                    ok = send_wire(preroll[i]) == ADPCM_BYTES;
                     if (ok) {
                         atomic_fetch_add(&mic_frames, 1);
                         captured_frames++;
@@ -634,7 +758,11 @@ static void microphone_task(void *unused)
 {
     int16_t frame[SAMPLES];
     for (;;) {
-        if (bsp_audio_read(frame, FRAME_BYTES) != ESP_OK) {
+        uint32_t read_at = now_ms();
+        esp_err_t read_result = bsp_audio_read(frame, FRAME_BYTES);
+        maximum(&mic_read_max_ms, now_ms() - read_at);
+        if (read_result != ESP_OK) {
+            atomic_fetch_add(&mic_read_errors, 1);
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -645,7 +773,7 @@ static void microphone_task(void *unused)
         xSemaphoreTake(send_lock, portMAX_DELAY);
         if (atomic_load(&capture_pending)) {
             if (preroll_count < PREROLL_FRAMES)
-                memcpy(preroll[preroll_count++], frame, FRAME_BYTES);
+                adpcm_encode(&input_codec, frame, preroll[preroll_count++]);
             else {
                 atomic_store(&capture_pending, false);
                 enqueue(CMD_FAULT, 0);
@@ -655,9 +783,13 @@ static void microphone_task(void *unused)
                 !atomic_exchange(&accept_requested, true))
                 enqueue(CMD_PTT_BEGIN, atomic_load(&capture_started));
         } else if (atomic_load(&recording) && atomic_load(&connected)) {
-            int sent = esp_websocket_client_send_bin(ws, (const char *)frame, FRAME_BYTES,
-                                                     pdMS_TO_TICKS(1000));
-            if (sent == FRAME_BYTES) {
+            if (atomic_load(&netcheck))
+                memset(frame, 0,
+                       sizeof(frame)); // Never transmit microphone samples during a probe.
+            uint8_t packet[ADPCM_BYTES];
+            adpcm_encode(&input_codec, frame, packet);
+            int sent = send_wire(packet);
+            if (sent == ADPCM_BYTES) {
                 atomic_fetch_add(&mic_frames, 1);
                 if (atomic_load(&ptt_held) && ++captured_frames >= 3000) {
                     atomic_store(&recording, false);
@@ -701,7 +833,7 @@ static void speaker_task(void *unused)
                 else {
                     playing = false;
                     prefill_since = 0;
-                    if (now - last_write < 150)
+                    if (now - last_write < 150 && !atomic_load(&end_pending))
                         atomic_fetch_add(&playback_refills, 1);
                 }
             }
@@ -807,6 +939,8 @@ static void health_task(void *unused)
         if (atomic_load(&ptt_held) && now_ms() - atomic_load(&capture_started) > 60000) {
             enqueue(CMD_PTT_END, 0);
         }
+        if (atomic_load(&netcheck) && now_ms() - atomic_load(&started_at) > 20000)
+            enqueue(CMD_NETCHECK_DONE, 0);
         if (atomic_load(&starting) && now_ms() - atomic_load(&started_at) > 55000) {
             atomic_store(&started_at, now_ms());
             enqueue(CMD_FAULT, 0);
@@ -821,17 +955,21 @@ static void health_task(void *unused)
         if (ticks % 100 == 0)
             ESP_LOGI(TAG,
                      "health heap=%lu tx=%u speaker=%u dropped=%u buffered=%u refills=%u "
-                     "connected=%d ready=%d listening=%d battery=%d",
+                     "connected=%d ready=%d listening=%d battery=%d min_heap=%lu "
+                     "alloc_fail=%u send_max_ms=%u wifi_lost=%u wifi_reason=%u",
                      (unsigned long)esp_get_free_heap_size(), atomic_load(&mic_frames),
                      atomic_load(&speaker_frames), atomic_load(&dropped_frames),
                      (unsigned)uxQueueMessagesWaiting(playback), atomic_load(&playback_refills),
                      atomic_load(&connected), atomic_load(&ready), atomic_load(&recording),
-                     device_battery());
+                     device_battery(), (unsigned long)esp_get_minimum_free_heap_size(),
+                     atomic_load(&alloc_failures), atomic_load(&send_max_ms),
+                     atomic_load(&wifi_disconnects), atomic_load(&wifi_last_reason));
     }
 }
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK(heap_caps_register_failed_alloc_callback(allocation_failed));
     ESP_ERROR_CHECK(nvs_flash_init());
     settings_init();
     atomic_store(&live_mode, false);
@@ -867,6 +1005,8 @@ void app_main(void)
         atomic_store(&boot_complete, true);
         return;
     }
+    ESP_ERROR_CHECK(
+        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_diagnostic, NULL));
     ESP_ERROR_CHECK(portal_start());
     static const char headers[] = "Authorization: Bearer " DEVICE_TOKEN "\r\n";
     // Keep a transport handle so each reconnect can configure its new socket.
@@ -875,6 +1015,7 @@ void app_main(void)
     assert(tcp_transport);
     esp_transport_handle_t transport = esp_transport_ws_init(tcp_transport);
     assert(transport);
+    ws_send_bind(transport, tcp_transport);
     const char *path = strchr(VOICE_URL + 5, '/');
     esp_transport_ws_config_t transport_config = {
         .ws_path = path ? path : "/",

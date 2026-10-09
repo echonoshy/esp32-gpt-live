@@ -29,10 +29,18 @@ CONFIG_FREERTOS_HZ=1000
 # --- Voice networking ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
-# 24 kHz PCM at ~300 ms WAN RTT needs more than the default 5760-byte window.
-# PTT uses only one high-bandwidth direction at a time.
-CONFIG_LWIP_TCP_WND_DEFAULT=32768
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+# Protocol 5: 24 kHz IMA-ADPCM uses 12.2 KB/s per direction.
+# RX 12 KiB accommodates ~1 second of flight. TX 16 KiB also leaves sufficient
+# small-packet queue slots above lwIP's writable low-water mark on high-RTT links.
+CONFIG_LWIP_TCP_WND_DEFAULT=12288
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+CONFIG_LWIP_TCP_OVERSIZE_MSS=n
+CONFIG_LWIP_TCP_OVERSIZE_DISABLE=n
+CONFIG_LWIP_TCP_OVERSIZE_QUARTER_MSS=y
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=12
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=12
+# Do not block receive/heartbeats behind an audio socket write.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
 
 # Dual-slot OTA with automatic rollback of an unconfirmed boot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

@@ -1,3 +1,4 @@
+mod adpcm;
 mod codex;
 mod conversation;
 mod preferences;
@@ -129,7 +130,7 @@ async fn main() -> Result<()> {
 
 async fn health(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":4,"version":env!("CARGO_PKG_VERSION")}),
+        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":5,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 
@@ -168,6 +169,8 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let mut session: Option<(Tx, tokio::task::JoinHandle<()>)> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut last_rx = tokio::time::Instant::now();
+    let mut compressed = false;
+    let mut output_codec = adpcm::Encoder::default();
     let _ = sink.send(status("idle")).await;
     tracing::info!("device connected");
     loop {
@@ -175,12 +178,21 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
             frame=source.next()=>{
                 let Some(Ok(frame))=frame else {break};
                 last_rx=tokio::time::Instant::now();
+                // In-flight microphone frames can arrive after the session receiver closes.
+                // They must not tear down an otherwise healthy device connection.
+                if session.as_ref().is_some_and(|(tx,_)|tx.is_closed()) {session=None}
                 match frame {
                     Message::Close(_)=>{let _=sink.flush().await;break},
                     Message::Ping(p)=>{if sink.send(Message::Pong(p)).await.is_err(){break}},
                     Message::Pong(_)=>{},
                     Message::Binary(bytes)=>{
-                        if !valid_pcm(&bytes) {break}
+                        let bytes = if compressed {
+                            let Some(decoded)=adpcm::decode(&bytes) else {break};
+                            decoded.into()
+                        } else {
+                            if !valid_pcm(&bytes) {break}
+                            bytes
+                        };
                         if let Some((tx,_))=&session {
                             if send(tx,Message::Binary(bytes)).is_err(){break}
                         }
@@ -188,15 +200,19 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                     Message::Text(s)=>{
                         let Ok(v)=serde_json::from_str::<Value>(&s) else {break};
                         let kind=v["type"].as_str().unwrap_or("");
-                        if kind=="start" {
+                        if kind=="start" || kind=="probe" {
                             if session.as_ref().is_some_and(|(_,task)|task.is_finished()) {session=None}
                             if session.is_none() {
+                                compressed=v["protocol"].as_u64().unwrap_or(1)>=5;
+                                output_codec=adpcm::Encoder::default();
                                 // Bounded startup backlog: preserve a held utterance while Codex connects.
                                 let (tx,rx)=mpsc::channel(if v["mode"]=="continuous" && v["protocol"].as_u64().unwrap_or(1)<4 {32} else {ptt::MAX_FRAMES + 8});
                                 let output=out.clone();let shared=app.clone();
                                 let prefs=match Preferences::parse(&v) { Ok(p)=>p, Err(error)=>{let _=send(&output,voice_error(&error));continue} };
+                                let probe=kind=="probe";
                                 session=Some((tx,tokio::spawn(async move {
-                                    if let Err(error)=run_session(shared,rx,output.clone(),prefs).await {
+                                    let result=if probe {run_probe(rx,output.clone()).await} else {run_session(shared,rx,output.clone(),prefs).await};
+                                    if let Err(error)=result {
                                         // No account tokens, SDP or conversation text in logs.
                                         tracing::warn!(%error,"voice session ended with error");
                                         let _=send(&output,voice_error(&error));
@@ -221,6 +237,15 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                 }
             },
             Some(message)=outgoing.recv()=>{
+                let message=match message {
+                    Message::Binary(bytes) if compressed=>{
+                        if bytes.len()!=FRAME_BYTES+4 {break;}
+                        let mut packet=bytes[..4].to_vec();
+                        packet.extend(output_codec.encode(&bytes[4..]));
+                        Message::Binary(packet.into())
+                    },
+                    message=>message
+                };
                 if !matches!(tokio::time::timeout(Duration::from_secs(2),sink.send(message)).await,Ok(Ok(()))){break}
             },
             _=heartbeat.tick()=>{
@@ -286,6 +311,72 @@ async fn worker_upgrade(
 struct PendingRegistration {
     id: String,
     app: Shared,
+}
+
+// Authenticated device transport check. No Codex, media worker, or microphone content.
+async fn run_probe(mut input: mpsc::Receiver<Message>, output: Tx) -> Result<()> {
+    let started = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut uplink_frames = 0u32;
+    let mut downlink_frames = 0u32;
+    let mut completed = false;
+    let mut pcm = vec![0; FRAME_BYTES + 4];
+    pcm[..4].copy_from_slice(&1u32.to_le_bytes());
+    send(&output, status("ready"))?;
+    send(&output, text(json!({"type":"listen","epoch":1})))?;
+    send(&output, text(json!({"type":"playback_begin","epoch":1})))?;
+    tracing::info!("silent transport probe started; no upstream voice session");
+    loop {
+        tokio::select! {
+            message=input.recv()=>match message {
+                Some(Message::Binary(bytes))=>{
+                    if bytes.iter().any(|b|*b!=0) {bail!("probe requires silence");}
+                    uplink_frames+=1;
+                },
+                Some(Message::Text(s)) if serde_json::from_str::<Value>(&s)?["type"]=="stop" =>break,
+                None=>break,
+                _=>{}
+            },
+            _=tick.tick()=>{
+                if started.elapsed()>=Duration::from_secs(12) {completed=true;break;}
+                send(&output,Message::Binary(pcm.clone().into()))?;
+                downlink_frames+=1;
+            }
+        }
+    }
+    if completed {
+        send(&output, text(json!({"type":"playback_end","epoch":1})))?;
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(message) = input.recv().await {
+                match message {
+                    Message::Binary(_) => uplink_frames += 1,
+                    Message::Text(s) => {
+                        let value: Value = serde_json::from_str(&s).unwrap_or_default();
+                        if value["type"] == "stop"
+                            || (value["type"] == "playback_drained" && value["epoch"] == 1)
+                        {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+    }
+    tracing::info!(
+        uplink_frames,
+        downlink_frames,
+        "silent transport probe finished"
+    );
+    send(
+        &output,
+        text(
+            json!({"type":"probe_done","uplink_frames":uplink_frames,"downlink_frames":downlink_frames}),
+        ),
+    )?;
+    Ok(())
 }
 impl Drop for PendingRegistration {
     fn drop(&mut self) {

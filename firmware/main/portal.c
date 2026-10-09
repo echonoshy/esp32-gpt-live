@@ -80,6 +80,7 @@ static esp_err_t info(httpd_req_t *r)
     cJSON_AddNumberToObject(j, "reply_length", p.reply_length);
     cJSON_AddNumberToObject(j, "language", p.language);
     cJSON_AddNumberToObject(j, "duplex", p.duplex);
+    device_add_diagnostics(j);
     char *s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
     if (!s)
@@ -134,6 +135,15 @@ static esp_err_t save(httpd_req_t *r)
                      "保存失败，请检查设置后重试");
     device_apply_settings();
     return error(r, "200 OK", "设置已保存；音色、说话风格、全双工和超时将在新对话生效");
+}
+static esp_err_t netcheck(httpd_req_t *r)
+{
+    if (!authorized(r))
+        return error(r, "403 Forbidden", "Refresh settings first");
+    if (device_busy() || portal_updating())
+        return error(r, "409 Conflict", "End the current conversation first");
+    device_netcheck();
+    return error(r, "200 OK", "12 second silent network check queued; no microphone or GPT");
 }
 static void restart(void *arg)
 {
@@ -259,11 +269,13 @@ esp_err_t portal_start(void)
     esp_err_t e = httpd_start(&server, &c);
     if (e != ESP_OK)
         return e;
-    const httpd_uri_t routes[] = {{.uri = "/", .method = HTTP_GET, .handler = root},
-                                  {.uri = "/api/info", .method = HTTP_GET, .handler = info},
-                                  {.uri = "/api/settings", .method = HTTP_POST, .handler = save},
-                                  {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi},
-                                  {.uri = "/api/update", .method = HTTP_POST, .handler = update}};
+    const httpd_uri_t routes[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = root},
+        {.uri = "/api/info", .method = HTTP_GET, .handler = info},
+        {.uri = "/api/settings", .method = HTTP_POST, .handler = save},
+        {.uri = "/api/netcheck", .method = HTTP_POST, .handler = netcheck},
+        {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi},
+        {.uri = "/api/update", .method = HTTP_POST, .handler = update}};
     for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         e = httpd_register_uri_handler(server, &routes[i]);
         if (e != ESP_OK) {
