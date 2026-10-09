@@ -12,7 +12,17 @@
 LV_FONT_DECLARE(ui_font_18);
 LV_FONT_DECLARE(ui_font_22);
 static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr,
-    *volume_popup, *mode_label, *selection;
+    *volume_popup, *mode_label, *selection, *status_surface;
+// Quiet paper-and-lilac palette; solid RGB565 fills keep the screen inexpensive to draw.
+enum {
+    UI_BACKGROUND = 0xf7f5f9,
+    UI_TEXT = 0x36323f,
+    UI_MUTED = 0x716977,
+    UI_ACCENT = 0x735b83,
+    UI_SURFACE = 0xece5f1,
+    UI_SELECTION = 0xe3d8eb,
+    UI_WARNING = 0xa64a64,
+};
 static int64_t last_touch, volume_until;
 static bool screen_on = true, setup_visible, menu_visible, live_mode;
 static int shown_battery = -2, shown_volume = -1;
@@ -92,31 +102,37 @@ void ui_init(void)
     bsp_lvgl_lock(0);
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_scrollable(screen, false);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0e1720), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(UI_BACKGROUND), 0);
     lv_obj_set_style_text_font(screen, &ui_font_18, 0);
-    lv_obj_t *title = label(16, 14, 104, 22, 0xc1d0d6);
+    lv_obj_t *title = label(16, 16, 96, 22, UI_MUTED);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_label_set_text(title, "GPT LIVE");
-    mode_label = label(120, 10, 104, 26, 0x83e2c6);
+    mode_label = label(120, 9, 108, 29, UI_ACCENT);
+    lv_obj_set_style_bg_color(mode_label, lv_color_hex(UI_SURFACE), 0);
+    lv_obj_set_style_bg_opa(mode_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(mode_label, 9, 0);
+    lv_obj_set_style_pad_top(mode_label, 3, 0);
+    lv_obj_set_style_pad_left(mode_label, 8, 0);
+    lv_obj_set_style_pad_right(mode_label, 8, 0);
     lv_obj_set_style_text_align(mode_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_text(mode_label, "按住说话");
-    battery_label = label(16, 43, 116, 26, 0xeaf1f3);
-    volume_label = label(138, 43, 86, 26, 0xeaf1f3);
+    battery_label = label(16, 49, 116, 26, UI_MUTED);
+    volume_label = label(138, 49, 86, 26, UI_MUTED);
     lv_obj_set_style_text_align(volume_label, LV_TEXT_ALIGN_RIGHT, 0);
-    panel(16, 75, 208, 1, 0x2a3b47, 0);
-    status_label = label(16, 86, 208, 30, 0x83e2c6);
+    status_surface = panel(12, 82, 216, 43, UI_SURFACE, 12);
+    status_label = label(24, 90, 192, 30, UI_TEXT);
     lv_obj_set_style_text_font(status_label, &ui_font_22, 0);
-    selection = panel(10, 119, 220, 25, 0x234a49, 5);
+    selection = panel(10, 119, 220, 25, UI_SELECTION, 6);
     lv_obj_set_hidden(selection, true);
-    guide = label(18, 137, 208, 120, 0xeaf1f3);
-    detail_label = label(16, 269, 208, 46, 0x9fb2bf);
+    guide = label(18, 137, 208, 120, UI_TEXT);
+    detail_label = label(16, 269, 208, 46, UI_MUTED);
     lv_obj_set_style_text_line_space(detail_label, 2, 0);
-    volume_popup = label(48, 179, 144, 44, 0x83e2c6);
+    volume_popup = label(48, 179, 144, 44, UI_ACCENT);
     lv_obj_set_style_text_align(volume_popup, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_top(volume_popup, 10, 0);
-    lv_obj_set_style_bg_color(volume_popup, lv_color_hex(0x253e4b), 0);
+    lv_obj_set_style_bg_color(volume_popup, lv_color_hex(UI_SELECTION), 0);
     lv_obj_set_style_bg_opa(volume_popup, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(volume_popup, 8, 0);
+    lv_obj_set_style_radius(volume_popup, 12, 0);
     lv_obj_set_hidden(volume_popup, true);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();
@@ -150,7 +166,7 @@ void ui_battery(int percent, int volume)
         else
             lv_label_set_text(battery_label, "电量 --");
         lv_obj_set_style_text_color(
-            battery_label, lv_color_hex(percent >= 0 && percent <= 15 ? 0xffbd82 : 0xeaf1f3), 0);
+            battery_label, lv_color_hex(percent >= 0 && percent <= 15 ? UI_WARNING : UI_MUTED), 0);
         shown_battery = percent;
     }
     if (volume != shown_volume) {
@@ -197,6 +213,9 @@ static void show_qr(const char *title, const char *payload, const char *instruct
         return;
     lv_obj_set_hidden(volume_popup, true);
     lv_obj_set_hidden(selection, true);
+    lv_obj_set_hidden(status_surface, true);
+    lv_obj_set_pos(status_label, 16, 86);
+    lv_obj_set_size(status_label, 208, 30);
     setup_visible = setup;
     lv_obj_set_hidden(guide, true);
     lv_label_set_text(mode_label, setup ? "网络配置" : "手机设置");
@@ -246,6 +265,9 @@ void ui_show_guide(void)
     setup_visible = false;
     menu_visible = false;
     lv_obj_set_hidden(selection, true);
+    lv_obj_set_hidden(status_surface, false);
+    lv_obj_set_pos(status_label, 24, 90);
+    lv_obj_set_size(status_label, 192, 30);
     lv_label_set_text(mode_label, live_mode ? "自由畅聊" : "按住说话");
     lv_obj_set_pos(guide, 18, 137);
     lv_obj_set_size(guide, 208, 120);
@@ -277,6 +299,9 @@ void ui_show_menu(const char *title, const char *const *items, int count, int se
     lv_obj_set_hidden(volume_popup, true);
     menu_visible = true;
     setup_visible = false;
+    lv_obj_set_hidden(status_surface, true);
+    lv_obj_set_pos(status_label, 16, 86);
+    lv_obj_set_size(status_label, 208, 30);
     lv_label_set_text(mode_label, "快捷设置");
     lv_obj_set_hidden(guide, false);
     lv_obj_set_pos(guide, 18, 120);
