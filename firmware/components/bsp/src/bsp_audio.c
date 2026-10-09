@@ -151,7 +151,7 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     esp_codec_dev_set_in_gain(s_dev, 30.0f);
 
     // The default curve maps 55% to -22.5 dB. Use the useful speech range;
-    // cap at 0 dB instead of boosting/clipping the PCM stream.
+    // cap the codec at 0 dB; speaker-task PCM gain has its own peak limiter.
     esp_codec_dev_vol_map_t points[] = {
         {0, -50.0f}, {5, -40.0f}, {25, -20.0f}, {50, -9.0f}, {75, -3.0f}, {100, 0.0f}
     };

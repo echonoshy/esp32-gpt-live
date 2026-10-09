@@ -33,6 +33,7 @@
 #include "adpcm.h"
 #include "ws_send.h"
 #include "audio_transport.h"
+#include "playback_gain.h"
 
 #define SAMPLES 480
 #define FRAME_BYTES (SAMPLES * sizeof(int16_t))
@@ -911,6 +912,7 @@ static void speaker_task(void *unused)
     int16_t samples[SAMPLES];
     uint32_t last_write = 0;
     playback_gate_t gate = {0};
+    playback_gain_t output_gain = {0};
     for (;;) {
         uint32_t now = now_ms(), current_epoch = atomic_load(&epoch);
         bool live = atomic_load(&live_mode), ended = atomic_load(&end_pending);
@@ -949,6 +951,7 @@ static void speaker_task(void *unused)
             if (atomic_exchange(&output_timing_pending, false))
                 ESP_LOGI(TAG, "PTT release_to_speaker_ms=%u", now - atomic_load(&released_at));
         }
+        playback_gain_apply(&output_gain, samples, SAMPLES);
         if (bsp_audio_write(samples, FRAME_BYTES) != ESP_OK)
             vTaskDelay(pdMS_TO_TICKS(20));
         // Drain the queue AND the 60 ms I2S DMA buffer before reopening the microphone.

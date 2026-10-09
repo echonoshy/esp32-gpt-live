@@ -1,4 +1,4 @@
-# 硬件与驱动来源
+# mic-on 硬件与驱动来源
 
 目标产品：FoloToy AI Passport。2026-10-08 经 esptool 实测：ESP32-C3 QFN32 v1.1、8 MB 内置 XMC Flash、40 MHz 晶振、USB Serial/JTAG。
 

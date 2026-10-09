@@ -107,7 +107,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(screen, &ui_font_18, 0);
     lv_obj_t *title = label(16, 16, 96, 22, UI_MUTED);
     lv_obj_set_style_text_font(title, &ui_font_16, 0);
-    lv_label_set_text(title, "GPT LIVE");
+    lv_label_set_text(title, "mic-on");
     mode_label = label(120, 9, 108, 29, UI_TEXT);
     lv_obj_set_style_bg_color(mode_label, lv_color_hex(UI_SURFACE), 0);
     lv_obj_set_style_bg_opa(mode_label, LV_OPA_COVER, 0);

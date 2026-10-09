@@ -153,7 +153,7 @@ static esp_err_t setup_page(httpd_req_t *request)
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
         "<style>body{font:16px sans-serif;max-width:420px;margin:40px auto;padding:20px}"
         "input,button{box-sizing:border-box;width:100%;padding:12px;margin:7px 0}</style>"
-        "<h1>Passport 配网</h1><p>输入家中或手机热点的 <b>2.4 GHz Wi-Fi</b> "
+        "<h1>mic-on 配网</h1><p>输入家中或手机热点的 <b>2.4 GHz Wi-Fi</b> "
         "名称和密码。保存后设备会自动重启并连接。</p>"
         "<p>当前设备热点没有互联网，这是正常现象，请保持连接直到保存完成。</p>"
         "<form method=post action=/configure>"
@@ -253,7 +253,7 @@ static esp_err_t start_provisioning(void)
 {
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP));
-    snprintf(setup_ssid, sizeof(setup_ssid), "GPT-Passport-%02X%02X", mac[4], mac[5]);
+    snprintf(setup_ssid, sizeof(setup_ssid), "mic-on-%02X%02X", mac[4], mac[5]);
 
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();

@@ -1,6 +1,10 @@
-# AI Passport × GPT-Live
+# mic-on
 
-个人使用的订阅语音终端。FoloToy AI Passport 通过 Wi-Fi 连接 Rust 服务，由服务器上已登录的 Codex 创建 GPT-Live 语音会话。
+基于 ESP32 的穿戴式实时语音终端，通过 GPT-Live 进行日常对话。
+
+mic-on 当前使用 FoloToy AI Passport，通过 Wi-Fi 连接 Rust 服务，由服务器上已登录的 Codex 创建 GPT-Live 语音会话。支持按住说话和连续对话；语音记录、随口备忘是后续计划，目前不保存日常音频或转写。
+
+GitHub：[echonoshy/mic-on](https://github.com/echonoshy/mic-on)。
 
 ## 实现
 
@@ -38,7 +42,7 @@ GPT-Live
 
 **0.7.6 使用参考 Anthropic 风格的轻量中文界面，不显示字幕、滚动文字或动态波形。** 暖米白底、炭灰正文、陶土橙色标记；大标题和状态使用 Noto Serif CJK SC / Lora 衬线字形，操作文字用 Noto Sans CJK SC / Poppins 无衬线字形，产品名用 16 px Lora。中文正文 18 px、标题 22 px，全部为 Flash 常驻 2 bpp 字形子集，无运行时字体加载。主屏状态以细线强调，菜单选中行用浅陶土底色；手机设置页采用同一方向并提供系统字体回退。顶部显示电量、音量和聊天模式，下方保留操作指南。主屏和扫码页不显示内网 IP；地址仅在「网络设置 → 查看连接信息」按需查看。未知电量显示 `--`，低电量用深陶土色提示。待机默认 60 秒息屏，按键唤亮。
 
-音量曲线由驱动默认的 55 → −22.5 dB 调整为 55 → −7.8 dB，最高为 0 dB；没有对 PCM 强行放大削波。默认音量 70；升级时一次性把原先非静音且小于 70 的音量提升至 70，其他设置保留，之后按用户设置保存。
+音量曲线由驱动默认的 55 → −22.5 dB 调整为 55 → −7.8 dB，codec 最高为 0 dB。播放端另加最多 2 倍（约 +6 dB）语音增益，每个 20 ms 帧先检测峰值并收回过量增益，将 PCM 峰值限制在 30000 以内；增益缓慢恢复，避免直接削波，不新增音频缓存等待。默认音量 70；升级时一次性把原先非静音且小于 70 的音量提升至 70，其他设置保留，之后按用户设置保存。数字限幅不保证功放或扬声器在最大音量下无失真，实际响度与听感需实机确认。
 
 ### 手机设置与无线升级
 
@@ -50,9 +54,9 @@ GPT-Live
 
 ### Wi-Fi 配置
 
-优先连接保存在 NVS 的网络；首次迁移仍兼容旧 `ripple` 命名空间。开机 30 秒连不上网络时，自动开放 `GPT-Passport-XXXX` 热点并显示二维码；也可下键 + OK → 网络设置 → 扫码连接无线网络 主动进入。
+优先连接保存在 NVS 的网络；首次迁移仍兼容旧 `ripple` 命名空间。开机 30 秒连不上网络时，自动开放 `mic-on-XXXX` 热点并显示二维码；也可下键 + OK → 网络设置 → 扫码连接无线网络 主动进入。
 
-1. 扫描设备第一张二维码，加入 `GPT-Passport-XXXX` 热点。该热点没有互联网，手机提示时选择保持连接。
+1. 扫描设备第一张二维码，加入 `mic-on-XXXX` 热点。该热点没有互联网，手机提示时选择保持连接。
 2. 手机通常会自动打开配网页面；若没有，在设备上短按 OK，扫描第二张二维码打开 `http://192.168.4.1/`。
 3. 在手机填写目标 **2.4 GHz** Wi-Fi 名称和密码，保存后设备重启连接。手机可切回原 Wi-Fi。
 4. 配网页面中短按 OK 可切换两张二维码，长按 OK 可取消并重试原网络。原网络不会因打开配网模式而被擦除。
@@ -69,7 +73,7 @@ uv pip install --python .tools/python/bin/python pyserial esptool websockets
 
 ## 服务端
 
-需要 Rust 1.88+、已经通过 ChatGPT 登录的 Codex CLI，以及可运行的 Chromium。当前部署目录：`/home/lake/workspaces/esp32-gpt-live`，监听端口 8787。
+需要 Rust 1.88+、已经通过 ChatGPT 登录的 Codex CLI，以及可运行的 Chromium。监听端口 8787。服务模板使用 `~/workspaces/mic-on`；现有部署仍位于 `/home/lake/workspaces/esp32-gpt-live`，复用时请按实际目录调整服务文件的 `WorkingDirectory`、`EnvironmentFile` 和 `ExecStart`。
 
 ```bash
 cargo build --release --locked
@@ -100,6 +104,7 @@ journalctl --user -u passport-voice.service -f
 
 目标为 ESP32-C3、8 MB Flash、无 PSRAM 的 FoloToy AI Passport。ESP-IDF 固定为 **5.5.3**；Managed Components 的精确版本在 `firmware/dependencies.lock`。
 
+项目对外名称为 `mic-on`。为兼容已部署服务和设备的 OTA 校验，服务程序仍名为 `passport-voice`，固件内部项目名及产物仍为 `passport-gpt-live` / `passport-gpt-live.bin`；已有设备设置继续使用原 NVS 命名空间。
 
 ```bash
 cp firmware/main/device_config.example.h firmware/main/device_config.h
