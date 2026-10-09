@@ -45,8 +45,7 @@ void ui_init(void)
     lv_label_set_text(volume_label, "VOL: --");
     status_label = label(14, 77, 212, 24, 0x80ded0);
     guide = label(14, 114, 212, 128, 0xf0f4f5);
-    lv_label_set_text(guide, "Hold OK: talk\nRelease OK: send\nShort OK: settings\n\nUP / DOWN: "
-                             "volume\n\nSpeak after RECORDING");
+    lv_label_set_text(guide, "Hold OK: talk\nRelease OK: send\nUP: settings\nDOWN: live on / off");
     detail_label = label(14, 262, 212, 50, 0xa4b5be);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();
@@ -145,7 +144,7 @@ void ui_show_setup(const char *ssid, bool website)
 void ui_show_settings(const char *url)
 {
     char detail[112];
-    snprintf(detail, sizeof(detail), "%s\nOK: back (same Wi-Fi)", url);
+    snprintf(detail, sizeof(detail), "%s\nHold OK: back (same Wi-Fi)", url);
     show_qr("SCAN FOR SETTINGS", url, detail, false);
 }
 void ui_show_guide(void)
@@ -159,10 +158,10 @@ void ui_show_guide(void)
     setup_visible = false;
     menu_visible = false;
     lv_obj_set_size(guide, 212, 128);
-    lv_label_set_text(guide, live_mode ? "Hold OK: start / interrupt\nShort OK: settings\n\nUP / "
-                                         "DOWN: volume\n\nSpeak after LISTENING"
-                                       : "Hold OK: talk\nRelease OK: send\nShort OK: "
-                                         "settings\n\nUP / DOWN: volume\n\nSpeak after RECORDING");
+    lv_label_set_text(guide, live_mode ? "Hold OK: talk (PTT)\nRelease OK: send\nUP: "
+                                         "settings\nDOWN: stop live\n\nSpeak after LISTENING"
+                                       : "Hold OK: talk\nRelease OK: send\nUP: settings\nDOWN: "
+                                         "start live\n\nTap OK: no action");
     lv_obj_set_hidden(guide, false);
     bsp_lvgl_unlock();
 }

@@ -8,6 +8,7 @@ pub const VOICES: [&str; 9] = [
 #[derive(Clone, Debug)]
 pub struct Preferences {
     pub continuous: bool,
+    pub fast_ptt: bool,
     pub tagged: bool,
     pub duplex: bool,
     pub idle_seconds: u64,
@@ -37,8 +38,9 @@ impl Preferences {
         let continuous = v["mode"] == "continuous";
         Ok(Self {
             continuous,
+            fast_ptt: v["protocol"].as_u64().unwrap_or(1) >= 4,
             tagged: v["protocol"].as_u64().unwrap_or(1) >= 2,
-            duplex: continuous && index("duplex", 1)? == 1,
+            duplex: index("duplex", 1)? == 1,
             idle_seconds: v["idle_seconds"].as_u64().unwrap_or(180).clamp(30, 900),
             voice: voice.into(),
             pace: index("pace", 2)?,

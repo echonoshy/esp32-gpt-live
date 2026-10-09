@@ -62,7 +62,7 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .max          = BTN_MV[i][1],
         };
         const button_config_t bc = {
-            // Short OK opens settings; hold OK records. UP/DOWN have no long shortcut.
+            // Long OK goes back in menus; chat hold detection/pre-roll is handled by the app.
             .long_press_time = 500,
         };
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);

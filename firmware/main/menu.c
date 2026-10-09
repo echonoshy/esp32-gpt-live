@@ -33,9 +33,8 @@ static int count(void)
     case ROOT:
     case VOICE:
     case DEVICE:
-        return 5;
     case CHAT:
-        return 6;
+        return 5;
     case NETWORK:
         return 3;
     case PICK_VOICE:
@@ -70,13 +69,12 @@ void menu_refresh(void)
         break;
     case CHAT:
         snprintf(title, 32, "CONVERSATION");
-        snprintf(rows[0], 42, "Mode: %s", p.mode ? "Live chat" : "Hold to talk");
-        snprintf(rows[1], 42, "New chat (clear context)");
-        snprintf(rows[2], 42, "End chat");
-        snprintf(rows[3], 42, "Live duplex: %s", p.duplex ? "Full" : "Half");
-        snprintf(rows[4], 42, "Idle timeout: %d s", p.idle_seconds);
-        snprintf(rows[5], 42, "Back");
-        snprintf(hint, 96, "Mode/duplex: next new chat\nFull duplex: experimental");
+        snprintf(rows[0], 42, "New chat (clear context)");
+        snprintf(rows[1], 42, "End chat");
+        snprintf(rows[2], 42, "Live duplex: %s", p.duplex ? "Full" : "Half");
+        snprintf(rows[3], 42, "Idle timeout: %d s", p.idle_seconds);
+        snprintf(rows[4], 42, "Back");
+        snprintf(hint, 96, "Duplex: next new chat");
         break;
     case VOICE:
         snprintf(title, 32, "VOICE");
@@ -143,6 +141,11 @@ void menu_refresh(void)
         break;
     }
     const char *items[10];
+    // Keep the back gesture visible on every level, including edit/confirmation pages.
+    char *line = strchr(hint, '\n');
+    if (line)
+        *line = 0;
+    strncat(hint, "\nHold OK: back", sizeof(hint) - strlen(hint) - 1);
     for (int i = 0; i < 10; i++)
         items[i] = rows[i];
     ui_show_menu(title, items, count(), selected, hint);
@@ -151,6 +154,34 @@ void menu_open(void)
 {
     enter(ROOT);
     menu_refresh();
+}
+menu_action_t menu_back(void)
+{
+    switch (page) {
+    case ROOT:
+        return MENU_CLOSE;
+    case PICK_VOICE:
+        enter(VOICE);
+        break;
+    case EDIT_VOLUME:
+    case EDIT_BRIGHT:
+    case EDIT_SCREEN:
+        enter(DEVICE);
+        break;
+    case EDIT_IDLE:
+    case CONFIRM_NEW:
+        enter(CHAT);
+        break;
+    case CONFIRM_WIFI:
+    case INFO:
+        enter(NETWORK);
+        break;
+    default:
+        enter(ROOT);
+        break;
+    }
+    menu_refresh();
+    return MENU_NONE;
 }
 static int cycle(int v, const int *values, int n, int direction)
 {
@@ -194,17 +225,14 @@ menu_action_t menu_key(int key)
             enter((page_t[]){CHAT, VOICE, DEVICE, NETWORK}[selected]);
             break;
         case CHAT:
-            if (selected == 0) {
-                p.mode = !p.mode;
-                changed = true;
-            } else if (selected == 1)
+            if (selected == 0)
                 enter(CONFIRM_NEW);
-            else if (selected == 2)
+            else if (selected == 1)
                 return MENU_STOP;
-            else if (selected == 3) {
+            else if (selected == 2) {
                 p.duplex = !p.duplex;
                 changed = true;
-            } else if (selected == 4)
+            } else if (selected == 3)
                 enter(EDIT_IDLE);
             else
                 enter(ROOT);

@@ -62,12 +62,14 @@ async def worker():
                     voiced = frames >= 8 and played < 12 and time.monotonic() - input_at > 0.35
                     if voiced:
                         played += 1
-                    await ws.send(struct.pack("<h", 1500 if voiced else 0) * 480)
+                    if voiced:
+                        log("output", worker=ident, sample=1500 + played)
+                    await ws.send(struct.pack("<h", 1500 + played if voiced else 0) * 480)
         task = asyncio.create_task(tick())
         try:
             async for m in ws:
                 if isinstance(m, bytes):
-                    log("audio", enabled=enabled, size=len(m), worker=ident)
+                    log("audio", enabled=enabled, size=len(m), worker=ident, at=time.monotonic())
                     if enabled:
                         frames += 1
                         if frames == 1:
@@ -190,9 +192,77 @@ async def check():
                 await until(lambda: any(isinstance(m, bytes) for m in messages))
                 await send("stop")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
+                # Protocol 4 streams input during the hold, but preserves early output for release.
+                messages.clear()
+                await send("start", protocol=4, mode="ptt", duplex=1)
+                await until(lambda: any(isinstance(m, dict) and m.get("state") == "ready" for m in messages))
+                session_count = len(events("session"))
+                count = len(events("audio"))
+                output_count = len(events("output"))
+                await send("ptt_start")
+                for _ in range(40):
+                    await ws.send(struct.pack("<h", 1200) * 480)
+                    await asyncio.sleep(0.02)
+                await until(lambda: len(events("audio")) == count + 40)
+                await until(lambda: len(events("output")) == output_count + 12)
+                assert not any(isinstance(m, bytes) for m in messages), "early reply escaped while OK held"
+                released = time.monotonic()
+                await send("ptt_end")
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                first_audio_ms = round((time.monotonic() - released) * 1000)
+                assert first_audio_ms < 400, f"buffered reply waited {first_audio_ms}ms"
+                await until(lambda: any(isinstance(m, dict) and m.get("type") == "playback_end" for m in messages))
+                samples = [struct.unpack_from("<h", m, 4)[0] for m in messages if isinstance(m, bytes)]
+                assert [v for v in samples if v] == list(range(1501, 1513)), "reply prefix/tail lost or reordered"
+                end = next(m for m in messages if isinstance(m, dict) and m.get("type") == "playback_end")
+                await send("playback_drained", epoch=end["epoch"])
+                await until(lambda: any(isinstance(m, dict) and m.get("type") == "waiting" and m.get("epoch") == end["epoch"] for m in messages))
+                # One-key switching and live -> hold use the same upstream conversation.
+                messages.clear()
+                await send("mode", mode="continuous")
+                await until(lambda: any(isinstance(m, dict) and m.get("mode") == "continuous" for m in messages))
+                count = len(events("audio"))
+                for _ in range(10):
+                    await ws.send(struct.pack("<h", 1200) * 480)
+                    await asyncio.sleep(0.02)
+                await until(lambda: len(events("audio")) == count + 10)
+                await until(lambda: any(isinstance(m, dict) and m.get("type") == "playback_begin" for m in messages))
+                count = len(events("audio"))
+                for _ in range(6):
+                    await ws.send(struct.pack("<h", 1200) * 480)
+                await until(lambda: len(events("audio")) == count + 6)
+                messages.clear()
+                count = len(events("audio"))
+                await send("ptt_start")
+                for _ in range(20):
+                    await ws.send(struct.pack("<h", 1200) * 480)
+                    await asyncio.sleep(0.02)
+                await until(lambda: len(events("audio")) == count + 20)
+                assert not any(isinstance(m, bytes) for m in messages)
+                await send("ptt_end")
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                await send("mode", mode="ptt")
+                await until(lambda: any(isinstance(m, dict) and m.get("mode") == "ptt" for m in messages))
+                assert len(events("session")) == session_count, "mode change reset context"
+                await send("stop")
+                await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
+                # Switching during startup must retain more than the legacy 32-frame live queue.
+                messages.clear()
+                count = len(events("audio"))
+                await send("start", protocol=4, mode="continuous")
+                await send("ptt_start")
+                for _ in range(60):
+                    await ws.send(struct.pack("<h", 1200) * 480)
+                await send("ptt_end")
+                await until(lambda: len(events("audio")) == count + 60)
+                assert all(e["enabled"] for e in events("audio")[count:])
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                await send("stop")
+                await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
                 await ws.close()
                 await reader
                 print("PASS: startup capture and early release, release-only model input, tagged playback, voice/prompt, fresh conversation, full-duplex barge-in, menu pause/resume, idle stop acknowledgement")
+                print(f"PASS: streaming PTT input, held-output gate, all 12 reply frames preserved, buffered first audio {first_audio_ms} ms (offline only), mode switch preserves context, live-to-PTT startup queue")
         finally:
             process.terminate()
             try:
