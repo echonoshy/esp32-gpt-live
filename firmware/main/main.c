@@ -243,11 +243,7 @@ static void mute(void)
 }
 static void idle_ui(void)
 {
-    char ip[20], detail[96];
-    voice_wifi_ip(ip, sizeof(ip));
-    snprintf(detail, sizeof(detail), "Hold OK: %s\nhttp://%s",
-             atomic_load(&live_mode) ? "talk (PTT)" : "talk", ip);
-    ui_set("READY", detail);
+    ui_set("READY", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
 }
 static void retry(void)
 {
@@ -263,10 +259,10 @@ static void retry(void)
     if (count > 3) {
         atomic_store(&wanted, false);
         atomic_store(&sticky_error, true);
-        ui_set("CONNECTION LOST", "Hold OK to retry\nDOWN+OK: menu");
+        ui_set("CONNECTION LOST", "按住 OK 重试\n下键 + OK 打开菜单");
     } else {
         atomic_store(&retry_at, now_ms() + (2000 << (count - 1)));
-        ui_set("RECONNECTING", "Please wait...");
+        ui_set("RECONNECTING", "请稍等片刻");
     }
 }
 static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data)
@@ -279,7 +275,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         atomic_store(&connected, true);
         if (atomic_load(&wanted)) {
             atomic_store(&retry_at, now_ms() + 1500);
-            ui_set("RECONNECTING", "Opening voice again...");
+            ui_set("RECONNECTING", "正在恢复语音连接");
         } else if (!atomic_load(&sticky_error))
             idle_ui();
         ESP_LOGI(TAG, "device bridge connected");
@@ -294,7 +290,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
             atomic_store(&ready, false);
             atomic_store(&starting, false);
             if (!atomic_load(&sticky_error))
-                ui_set("CONNECTING", "Connecting voice server...");
+                ui_set("CONNECTING", "正在连接语音服务");
         }
     } else if (event == WEBSOCKET_EVENT_DATA) {
         esp_websocket_event_data_t *frame = data;
@@ -349,7 +345,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&sticky_error, false);
                 } else if (!strcmp(state->valuestring, "connecting") && atomic_load(&wanted) &&
                            !atomic_load(&recording))
-                    ui_set("CONNECTING VOICE", "Opening subscription voice...");
+                    ui_set("CONNECTING VOICE", "正在打开订阅语音");
                 else if (!strcmp(state->valuestring, "idle")) {
                     bool active = atomic_load(&ready) || atomic_load(&starting);
                     mute();
@@ -371,7 +367,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                              atomic_load(&live_mode) ? now_ms() : microphone_deadline());
                 atomic_store(&can_listen, true);
                 atomic_store(&recording, atomic_load(&live_mode) && !atomic_load(&menu_active));
-                ui_set("LISTENING", "Hold OK: talk  DOWN+OK: menu");
+                ui_set("LISTENING", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
             } else if (!strcmp(type, "playback_begin") && atomic_load(&ready) &&
                        !atomic_load(&awaiting_clear)) {
                 atomic_store(&can_listen, atomic_load(&full_duplex));
@@ -381,7 +377,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&receive_last_ms, 0);
                 if (!atomic_load(&live_mode)) {
                     atomic_store(&interaction_active, true);
-                    ui_set("SPEAKING", "Tap OK: stop  UP/DOWN: volume");
+                    ui_set("SPEAKING", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
                 }
             } else if (!strcmp(type, "playback_end") && atomic_load(&ready) &&
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
@@ -396,12 +392,12 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&recording, capture && !atomic_load(&menu_active));
                 if (capture)
                     ui_set(atomic_load(&live_mode) ? "LISTENING" : "RECORDING",
-                           "Release OK to send in hold mode");
+                           "按住说话时，松开发送");
             } else if (!strcmp(type, "activity") && atomic_load(&live_mode)) {
                 cJSON *active = cJSON_GetObjectItem(m, "active");
                 atomic_store(&interaction_active, cJSON_IsTrue(active));
                 ui_set(cJSON_IsTrue(active) ? "LIVE CHATTING" : "LIVE LISTENING",
-                       "Tap OK: stop  UP/DOWN: volume");
+                       "下键 + OK 按住 0.8 秒\n打开快捷菜单");
             } else if (!strcmp(type, "waiting") && !atomic_load(&live_mode)) {
                 if (!atomic_load(&recording) && !atomic_load(&ptt_held)) {
                     atomic_store(&epoch, e);
@@ -409,13 +405,13 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&awaiting_clear, false);
                     cJSON *too_long = cJSON_GetObjectItem(m, "too_long");
                     ui_set(cJSON_IsTrue(too_long) ? "RECORDING TOO LONG" : "HOLD TO TALK",
-                           cJSON_IsTrue(too_long) ? "Not sent. Max 60 seconds"
-                                                  : "Hold OK, then speak\nDOWN+OK: menu");
+                           cJSON_IsTrue(too_long) ? "本次未发送\n每次说话最多 60 秒"
+                                                  : "下键 + OK 按住 0.8 秒\n打开快捷菜单");
                 }
             } else if (!strcmp(type, "submitted")) {
                 atomic_store(&interaction_active, true);
                 if (!atomic_load(&ptt_held))
-                    ui_set("THINKING", "Waiting for reply...");
+                    ui_set("THINKING", "稍等，正在等待回复");
             } else if (!strcmp(type, "probe_done")) {
                 atomic_store(&wanted, false);
                 atomic_store(&recording, false);
@@ -434,10 +430,10 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&sticky_error, true);
                     ui_set("VOICE UNAVAILABLE",
                            cJSON_IsString(message) && !strcmp(message->valuestring, "account")
-                               ? "Server login required"
+                               ? "请在服务端重新登录"
                            : cJSON_IsString(message) && !strcmp(message->valuestring, "quota")
-                               ? "Voice usage unavailable"
-                               : "Hold OK to retry");
+                               ? "当前语音额度不可用"
+                               : "按住 OK 重试");
                 }
             } else if (!strcmp(type, "ended")) {
                 cJSON *reason = cJSON_GetObjectItem(m, "reason");
@@ -448,8 +444,8 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&starting, false);
                 atomic_store(&sticky_error, true);
                 ui_set("CHAT ENDED", cJSON_IsString(reason) && !strcmp(reason->valuestring, "limit")
-                                         ? "30 min limit. Hold OK: start"
-                                         : "Idle timeout. Hold OK: start");
+                                         ? "已满 30 分钟\n按住 OK 重新开始"
+                                         : "空闲时间过长\n按住 OK 重新开始");
             }
             cJSON_Delete(m);
         }
@@ -501,11 +497,11 @@ static void show_home(void)
     ui_mode(live);
     ui_show_guide();
     if (atomic_load(&recording))
-        ui_set(live ? "LISTENING" : "RECORDING", "DOWN+OK: menu");
+        ui_set(live ? "LISTENING" : "RECORDING", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
     else if (atomic_load(&ready))
-        ui_set(live ? "CHAT ACTIVE" : "HOLD TO TALK", "Hold OK: talk / interrupt");
+        ui_set(live ? "CHAT ACTIVE" : "HOLD TO TALK", "按住 OK 开始说话");
     else if (atomic_load(&starting))
-        ui_set("CONNECTING VOICE", "Please wait...");
+        ui_set("CONNECTING VOICE", "请稍等片刻");
     else
         idle_ui();
 }
@@ -514,7 +510,7 @@ static void start_session(void)
     if (!atomic_load(&wanted) || atomic_load(&starting) || atomic_load(&ready))
         return;
     if (!atomic_load(&connected)) {
-        ui_set("SERVER NOT CONNECTED", "DOWN+OK: menu");
+        ui_set("SERVER NOT CONNECTED", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
         return;
     }
     settings_t p = settings_get();
@@ -532,7 +528,7 @@ static void start_session(void)
     if (!send_json(start))
         retry();
     else
-        ui_set("CONNECTING VOICE", live ? "Wait for LISTENING" : "Hold OK to record");
+        ui_set("CONNECTING VOICE", live ? "连接后即可自由说话" : "按住 OK 开始收音");
     ui_mode(live);
     if (!atomic_load(&menu_active) && !settings_open)
         ui_show_guide();
@@ -637,7 +633,7 @@ static void command_task(void *unused)
                 ui_show_guide();
                 atomic_store(&restart_pending, atomic_load(&connected));
                 stop_session();
-                ui_set("NEW CONVERSATION", "Clearing previous context...");
+                ui_set("NEW CONVERSATION", "正在清空上一段对话");
                 if (!atomic_load(&connected))
                     enqueue(CMD_NEW_START, 0);
             } else if (action == MENU_STOP) {
@@ -648,12 +644,12 @@ static void command_task(void *unused)
                 atomic_store(&menu_active, false);
                 ui_show_guide();
                 if (voice_wifi_request_setup() != ESP_OK)
-                    ui_set("SETUP UNAVAILABLE", "Please restart and retry");
+                    ui_set("SETUP UNAVAILABLE", "请重启设备后再试");
             } else if (action == MENU_PHONE) {
                 if (device_busy()) {
                     menu_notice = true;
-                    const char *items[] = {"End chat first", "Conversation > End chat"};
-                    ui_show_menu("PHONE SETTINGS", items, 2, 0, "OK: return to menu");
+                    const char *items[] = {"请先结束当前对话", "对话管理 > 结束对话"};
+                    ui_show_menu("手机设置", items, 2, 0, "短按或长按 OK 返回");
                 } else if (voice_wifi_connected()) {
                     atomic_store(&menu_active, false);
                     settings_open = true;
@@ -680,7 +676,7 @@ static void command_task(void *unused)
                 if (!send_json("{\"type\":\"cancel\"}"))
                     retry();
                 else
-                    ui_set("STOPPED", "Context kept. Hold OK: talk");
+                    ui_set("STOPPED", "已保留上下文\n按住 OK 继续说话");
             }
         } else if (c.type == CMD_SETTINGS) {
             cancel_pending_capture();
@@ -714,7 +710,7 @@ static void command_task(void *unused)
                 continue;
             if (!atomic_load(&connected)) {
                 cancel_pending_capture();
-                ui_set("SERVER NOT CONNECTED", "DOWN+OK: menu");
+                ui_set("SERVER NOT CONNECTED", "下键 + OK 按住 0.8 秒\n打开快捷菜单");
                 continue;
             }
             atomic_store(&live_mode, false);
@@ -747,7 +743,7 @@ static void command_task(void *unused)
                 else {
                     ui_mode(false);
                     ui_show_guide();
-                    ui_set("RECORDING", "Speak now. Release OK: send");
+                    ui_set("RECORDING", "说完后松开 OK 发送");
                 }
             } else {
                 cancel_pending_capture();
@@ -763,7 +759,7 @@ static void command_task(void *unused)
                 if (!send_json("{\"type\":\"ptt_end\"}"))
                     retry();
                 else if (!atomic_load(&menu_active))
-                    ui_set("THINKING", "Waiting for reply...");
+                    ui_set("THINKING", "稍等，正在等待回复");
             }
         } else if (c.type == CMD_LIVE) {
             cancel_pending_capture();

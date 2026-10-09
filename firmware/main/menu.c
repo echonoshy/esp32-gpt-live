@@ -23,9 +23,9 @@ typedef enum {
 static page_t page;
 static int selected;
 static bool live_mode;
-static const char *const pace[] = {"Normal", "Slow", "Fast"};
-static const char *const length[] = {"Short", "One sentence", "Detailed"};
-static const char *const language[] = {"Chinese", "English", "Follow user"};
+static const char *const pace[] = {"自然", "舒缓", "较快"};
+static const char *const length[] = {"简短", "一句话", "详细"};
+static const char *const language[] = {"中文", "英文", "跟随说话"};
 static const int sleeps[] = {15, 30, 60, 120, 300, 600};
 static const int timeouts[] = {60, 180, 300, 600, 900};
 static int count(void)
@@ -60,88 +60,88 @@ static bool editing(void)
 void menu_refresh(void)
 {
     settings_t p = settings_get();
-    char rows[10][42] = {{0}}, title[32] = "SETTINGS", hint[96] = "UP/DOWN: move  OK: select";
+    char rows[10][64] = {{0}}, title[48] = "设置", hint[128] = "上下选择，OK 确认";
     switch (page) {
     case ROOT:
-        snprintf(title, 32, "QUICK MENU");
-        snprintf(rows[0], 42, "%s live chat", live_mode ? "Exit" : "Start");
-        snprintf(rows[1], 42, "Conversation");
-        snprintf(rows[2], 42, "Voice");
-        snprintf(rows[3], 42, "Device");
-        snprintf(rows[4], 42, "Network");
-        snprintf(rows[5], 42, "Back to chat");
+        snprintf(title, sizeof(title), "快捷菜单");
+        snprintf(rows[0], sizeof(rows[0]), "%s畅聊", live_mode ? "退出" : "开启");
+        snprintf(rows[1], sizeof(rows[1]), "对话管理");
+        snprintf(rows[2], sizeof(rows[2]), "音色与风格");
+        snprintf(rows[3], sizeof(rows[3]), "设备设置");
+        snprintf(rows[4], sizeof(rows[4]), "网络设置");
+        snprintf(rows[5], sizeof(rows[5]), "返回聊天");
         break;
     case CHAT:
-        snprintf(title, 32, "CONVERSATION");
-        snprintf(rows[0], 42, "New chat (clear context)");
-        snprintf(rows[1], 42, "End chat");
-        snprintf(rows[2], 42, "Live: always full duplex");
-        snprintf(rows[3], 42, "Idle timeout: %d s", p.idle_seconds);
-        snprintf(rows[4], 42, "Back");
-        snprintf(hint, 96, "Context kept on mode switch");
+        snprintf(title, sizeof(title), "对话管理");
+        snprintf(rows[0], sizeof(rows[0]), "新对话（清空上下文）");
+        snprintf(rows[1], sizeof(rows[1]), "结束对话");
+        snprintf(rows[2], sizeof(rows[2]), "畅聊：支持随时插话");
+        snprintf(rows[3], sizeof(rows[3]), "空闲结束：%d 秒", p.idle_seconds);
+        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
+        snprintf(hint, sizeof(hint), "切换模式保留上下文");
         break;
     case VOICE:
-        snprintf(title, 32, "VOICE");
-        snprintf(rows[0], 42, "Voice: %s", settings_voice(p.voice));
-        snprintf(rows[1], 42, "Pace: %s", pace[p.pace]);
-        snprintf(rows[2], 42, "Reply: %s", length[p.reply_length]);
-        snprintf(rows[3], 42, "Language: %s", language[p.language]);
-        snprintf(rows[4], 42, "Back");
-        snprintf(hint, 96, "Saved for next new chat\nPace/reply/language: guidance");
+        snprintf(title, sizeof(title), "音色与风格");
+        snprintf(rows[0], sizeof(rows[0]), "音色：%s", settings_voice(p.voice));
+        snprintf(rows[1], sizeof(rows[1]), "语速：%s", pace[p.pace]);
+        snprintf(rows[2], sizeof(rows[2]), "回复：%s", length[p.reply_length]);
+        snprintf(rows[3], sizeof(rows[3]), "语言：%s", language[p.language]);
+        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
+        snprintf(hint, sizeof(hint), "新对话生效");
         break;
     case DEVICE:
-        snprintf(title, 32, "DEVICE");
-        snprintf(rows[0], 42, "Volume: %d", p.volume);
-        snprintf(rows[1], 42, "Brightness: %d", p.brightness);
-        snprintf(rows[2], 42, "Screen sleep: %d s", p.screen_seconds);
-        snprintf(rows[3], 42, "Phone / firmware update");
-        snprintf(rows[4], 42, "Back");
+        snprintf(title, sizeof(title), "设备设置");
+        snprintf(rows[0], sizeof(rows[0]), "音量：%d", p.volume);
+        snprintf(rows[1], sizeof(rows[1]), "亮度：%d", p.brightness);
+        snprintf(rows[2], sizeof(rows[2]), "自动息屏：%d 秒", p.screen_seconds);
+        snprintf(rows[3], sizeof(rows[3]), "手机设置与固件更新");
+        snprintf(rows[4], sizeof(rows[4]), "返回上一级");
         break;
     case NETWORK:
-        snprintf(title, 32, "NETWORK");
-        snprintf(rows[0], 42, "Wi-Fi setup (QR)");
-        snprintf(rows[1], 42, "Connection info");
-        snprintf(rows[2], 42, "Back");
+        snprintf(title, sizeof(title), "网络设置");
+        snprintf(rows[0], sizeof(rows[0]), "扫码连接无线网络");
+        snprintf(rows[1], sizeof(rows[1]), "查看连接信息");
+        snprintf(rows[2], sizeof(rows[2]), "返回上一级");
         break;
     case PICK_VOICE:
-        snprintf(title, 32, "CHOOSE VOICE");
+        snprintf(title, sizeof(title), "选择音色");
         for (int i = 0; i < VOICE_COUNT; i++)
-            snprintf(rows[i], 42, "%s%s", i == p.voice ? "* " : "", settings_voice(i));
-        snprintf(rows[VOICE_COUNT], 42, "Back");
-        snprintf(hint, 96, "OK: save this voice\nApplies to next new chat");
+            snprintf(rows[i], sizeof(rows[i]), "%s%s", i == p.voice ? "* " : "", settings_voice(i));
+        snprintf(rows[VOICE_COUNT], sizeof(rows[VOICE_COUNT]), "返回上一级");
+        snprintf(hint, sizeof(hint), "OK 保存，新对话生效");
         break;
     case CONFIRM_NEW:
-        snprintf(title, 32, "CLEAR CONTEXT?");
-        snprintf(rows[0], 42, "Yes, start a new chat");
-        snprintf(rows[1], 42, "Back");
-        snprintf(hint, 96, "Current conversation ends\nNew voice settings will apply");
+        snprintf(title, sizeof(title), "清空上下文？");
+        snprintf(rows[0], sizeof(rows[0]), "确认开启新对话");
+        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
+        snprintf(hint, sizeof(hint), "将结束当前对话");
         break;
     case CONFIRM_WIFI:
-        snprintf(title, 32, "SET UP WI-FI?");
-        snprintf(rows[0], 42, "Restart into setup");
-        snprintf(rows[1], 42, "Back");
-        snprintf(hint, 96, "Chat ends; saved Wi-Fi kept\nScan QR with your phone");
+        snprintf(title, sizeof(title), "重新配置网络？");
+        snprintf(rows[0], sizeof(rows[0]), "重启并进入配网");
+        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
+        snprintf(hint, sizeof(hint), "保留原网络，结束对话");
         break;
     case INFO: {
         char ip[20];
         voice_wifi_ip(ip, sizeof(ip));
-        snprintf(title, 32, "CONNECTION");
-        snprintf(rows[0], 42, "%s", voice_wifi_connected() ? ip : "Wi-Fi disconnected");
-        snprintf(hint, 96, "OK: back");
+        snprintf(title, sizeof(title), "连接信息");
+        snprintf(rows[0], sizeof(rows[0]), "%s", voice_wifi_connected() ? ip : "无线网络未连接");
+        snprintf(hint, sizeof(hint), "短按 OK 返回");
         break;
     }
     default:
-        snprintf(title, 32, "ADJUST");
-        snprintf(rows[0], 42, "%s: %d",
-                 page == EDIT_VOLUME   ? "Volume"
-                 : page == EDIT_BRIGHT ? "Brightness"
-                 : page == EDIT_SCREEN ? "Sleep (s)"
-                                       : "Idle (s)",
+        snprintf(title, sizeof(title), "调整设置");
+        snprintf(rows[0], sizeof(rows[0]), "%s：%d",
+                 page == EDIT_VOLUME   ? "音量"
+                 : page == EDIT_BRIGHT ? "亮度"
+                 : page == EDIT_SCREEN ? "息屏秒数"
+                                       : "空闲秒数",
                  page == EDIT_VOLUME   ? p.volume
                  : page == EDIT_BRIGHT ? p.brightness
                  : page == EDIT_SCREEN ? p.screen_seconds
                                        : p.idle_seconds);
-        snprintf(hint, 96, "UP/DOWN: adjust\nOK: save and back");
+        snprintf(hint, sizeof(hint), "上下调整，OK 返回");
         break;
     }
     const char *items[10];
@@ -149,7 +149,7 @@ void menu_refresh(void)
     char *line = strchr(hint, '\n');
     if (line)
         *line = 0;
-    strncat(hint, "\nHold OK: back", sizeof(hint) - strlen(hint) - 1);
+    strncat(hint, "\n长按 OK 返回上一级", sizeof(hint) - strlen(hint) - 1);
     for (int i = 0; i < 10; i++)
         items[i] = rows[i];
     ui_show_menu(title, items, count(), selected, hint);
@@ -298,8 +298,8 @@ menu_action_t menu_key(int key)
             break;
         }
     if (changed && settings_save(p) != ESP_OK) {
-        const char *message[] = {"Could not save settings", "Press OK to retry"};
-        ui_show_menu("SAVE FAILED", message, 2, 0, "Settings unchanged");
+        const char *message[] = {"设置保存失败", "请按 OK 重试"};
+        ui_show_menu("保存失败", message, 2, 0, "设置未更改");
         return MENU_NONE;
     }
     menu_refresh();

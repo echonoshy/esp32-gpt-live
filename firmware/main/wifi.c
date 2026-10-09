@@ -61,7 +61,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Wi-Fi disconnected, reason=%u", event->reason);
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED);
-        ui_set("WI-FI RECONNECTING", "Wait or hold DOWN\nfor phone Wi-Fi setup");
+        ui_set("WI-FI RECONNECTING", "正在尝试重新连接\n下键 + OK 打开菜单");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Wi-Fi connected, IP acquired");
@@ -200,7 +200,7 @@ static esp_err_t save_config(httpd_req_t *request)
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "Could not save Wi-Fi");
 
-    ui_set("WI-FI SAVED", "Restarting...");
+    ui_set("WI-FI SAVED", "设备即将重启");
     httpd_resp_set_type(request, "text/plain; charset=utf-8");
     httpd_resp_sendstr(request, "Wi-Fi 已保存，设备正在重启。手机可切回原来的 Wi-Fi。");
     xTaskCreate(delayed_restart, "restart", 2048, NULL, 4, NULL);
@@ -339,7 +339,7 @@ esp_err_t voice_wifi_start(void)
     if (!configured)
         return start_provisioning();
 
-    ui_set("CONNECTING WI-FI", "Please wait...\nUP: network settings");
+    ui_set("CONNECTING WI-FI", "请稍等，正在连接\n连接失败将进入配网");
     esp_netif_t *station = esp_netif_create_default_wifi_sta();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));

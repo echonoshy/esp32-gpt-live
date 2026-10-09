@@ -33,7 +33,7 @@ void ui_show_menu(const char *t, const char *const *items, int count, int select
 {
     (void)items;
     assert(selected >= 0 && selected < count);
-    assert(strstr(hint, "Hold OK: back"));
+    assert(strstr(hint, "长按 OK 返回上一级"));
     snprintf(title, sizeof(title), "%s", t);
 }
 int main(void)
@@ -44,16 +44,16 @@ int main(void)
     menu_key(1);
     menu_key(0); // Conversation
     menu_key(0); // New chat confirmation
-    assert(!strcmp(title, "CLEAR CONTEXT?"));
-    assert(menu_back() == MENU_NONE && !strcmp(title, "CONVERSATION"));
+    assert(!strcmp(title, "清空上下文？"));
+    assert(menu_back() == MENU_NONE && !strcmp(title, "对话管理"));
     menu_back();
     menu_key(1);
     menu_key(1);
     menu_key(0);
     menu_key(0); // Voice > Choose voice
-    assert(!strcmp(title, "CHOOSE VOICE"));
+    assert(!strcmp(title, "选择音色"));
     menu_back();
-    assert(!strcmp(title, "VOICE"));
+    assert(!strcmp(title, "音色与风格"));
     menu_back();
     menu_key(1);
     menu_key(1);
@@ -62,7 +62,7 @@ int main(void)
     menu_key(0);
     menu_key(-1); // Volume +5 saved before returning
     menu_back();
-    assert(!strcmp(title, "DEVICE") && prefs.volume == 75);
+    assert(!strcmp(title, "设备设置") && prefs.volume == 75);
     menu_back();
     menu_key(1);
     menu_key(1);
@@ -70,14 +70,14 @@ int main(void)
     menu_key(1);
     menu_key(0); // Network
     menu_key(0);
-    assert(!strcmp(title, "SET UP WI-FI?"));
+    assert(!strcmp(title, "重新配置网络？"));
     menu_back();
-    assert(!strcmp(title, "NETWORK"));
+    assert(!strcmp(title, "网络设置"));
     menu_key(1);
     menu_key(0);
-    assert(!strcmp(title, "CONNECTION"));
+    assert(!strcmp(title, "连接信息"));
     menu_back();
-    assert(!strcmp(title, "NETWORK"));
+    assert(!strcmp(title, "网络设置"));
     menu_back();
     assert(menu_back() == MENU_CLOSE);
     puts("PASS: every menu parent, confirmation back, volume retention, root exit");
