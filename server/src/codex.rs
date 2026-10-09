@@ -26,8 +26,6 @@ pub struct Codex {
     thread: Option<String>,
 }
 
-const PROMPT: &str = "你是一个随身语音聊天助手。默认用自然的普通话，简短回答，一次一到三句话。听不清时请用户重说，不要猜测。记住本次对话上下文。闲聊直接回复，仅在确实需要深入推理时委派后台。不操作文件，不运行命令，不调用工具，不承诺保存笔记或提醒。允许用户打断。";
-
 impl Codex {
     pub async fn open() -> Result<Self> {
         let directory = tempfile::tempdir()?;
@@ -118,7 +116,7 @@ impl Codex {
             _directory: directory,
             thread: None,
         };
-        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.3.0"},"capabilities":{"experimentalApi":true}})).await?;
+        this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.4.0"},"capabilities":{"experimentalApi":true}})).await?;
         this.stdin
             .lock()
             .await
@@ -151,14 +149,19 @@ impl Codex {
         result
     }
 
-    pub async fn start(&mut self, sdp: &str) -> Result<()> {
-        let response = self.rpc("thread/start",json!({"cwd":self._directory.path(),"ephemeral":true,"approvalPolicy":"never","sandbox":"read-only","environments":[],"baseInstructions":PROMPT,"developerInstructions":PROMPT})).await?;
+    pub async fn start(
+        &mut self,
+        sdp: &str,
+        prefs: &crate::preferences::Preferences,
+    ) -> Result<()> {
+        let prompt = prefs.prompt();
+        let response = self.rpc("thread/start",json!({"cwd":self._directory.path(),"ephemeral":true,"approvalPolicy":"never","sandbox":"read-only","environments":[],"baseInstructions":prompt,"developerInstructions":prompt})).await?;
         let thread = response["thread"]["id"]
             .as_str()
             .context("missing thread id")?
             .to_owned();
         self.thread = Some(thread.clone());
-        self.rpc("thread/realtime/start",json!({"threadId":thread,"version":"v3","outputModality":"audio","transport":{"type":"webrtc","sdp":sdp},"codexResponseHandoffMode":"commentary","includeStartupContext":false,"prompt":PROMPT})).await?;
+        self.rpc("thread/realtime/start",json!({"threadId":thread,"version":"v3","outputModality":"audio","transport":{"type":"webrtc","sdp":sdp},"codexResponseHandoffMode":"commentary","includeStartupContext":false,"prompt":prompt,"voice":prefs.voice})).await?;
         Ok(())
     }
 

@@ -339,7 +339,7 @@ esp_err_t voice_wifi_start(void)
     if (!configured)
         return start_provisioning();
 
-    ui_set("CONNECTING WI-FI", "Please wait...\nHold DOWN for setup");
+    ui_set("CONNECTING WI-FI", "Please wait...\nShort OK: network settings");
     esp_netif_t *station = esp_netif_create_default_wifi_sta();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));

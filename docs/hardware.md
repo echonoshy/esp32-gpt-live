@@ -15,3 +15,5 @@
 第二阶段电量计驱动单独更新自 [AI Passport 官方 bsp_battery.c](https://github.com/FoloToy/ai-passport/blob/main/components/bsp/src/bsp_battery.c)（2026-10-09 读取），沿用官方优特利 520mAh 电池 profile、逐字节读回校验和首次 SOC 等待。旧适配省略 profile 初始化时，当前设备持续返回无效 SOC；不能将它当作百分比显示。其他 BSP 不随本次更新整体替换。
 
 0.3.0 的电量显示异常定位于文字布局：此前中文字库行高 31 像素，而状态栏标签高度 20 像素。改用内置 Montserrat 14，电量/音量各自占据固定 24 像素高区域；保留电量计读取逻辑。音频保持原 I2S 时钟和采样格式，仅通过 esp_codec_dev 的公开音量曲线接口调整响度，最高 0 dB，音量 0 显式静音。
+
+0.4.0 核对了厂家 [产品规格](https://github.com/FoloToy/ai-passport/blob/main/docs/hardware-design/specifications.md) 与公开引脚表：独立电源键是硬件电源输入（约 0.5 秒开机、约 2 秒关机），BSP 只公开 GPIO0 分压的 UP/DOWN/OK。没有发现可由固件处理的电源短按事件，因此设置使用短按 OK，语音使用按住 OK 500 ms 后开始、松开发送；不尝试猜测其他 GPIO。

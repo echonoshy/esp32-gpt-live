@@ -1,0 +1,14 @@
+#pragma once
+#include <stdbool.h>
+typedef enum {
+    MENU_NONE,
+    MENU_CLOSE,
+    MENU_NEW_CHAT,
+    MENU_STOP,
+    MENU_WIFI,
+    MENU_PHONE
+} menu_action_t;
+void menu_open(void);
+// -1 up, +1 down, 0 select. All state belongs to the command task.
+menu_action_t menu_key(int key);
+void menu_refresh(void);

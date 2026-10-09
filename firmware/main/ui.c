@@ -11,7 +11,8 @@
 // Only built-in Latin fonts. No captions, scrolling labels or level animation.
 static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr;
 static int64_t last_touch;
-static bool screen_on = true, setup_visible;
+static bool screen_on = true, setup_visible, menu_visible;
+static bool live_mode;
 static int shown_battery = -2, shown_volume = -1;
 
 static lv_obj_t *label(int x, int y, int w, int h, uint32_t color)
@@ -44,8 +45,8 @@ void ui_init(void)
     lv_label_set_text(volume_label, "VOL: --");
     status_label = label(14, 77, 212, 24, 0x80ded0);
     guide = label(14, 114, 212, 128, 0xf0f4f5);
-    lv_label_set_text(guide, "OK: start / interrupt\nHold OK: end chat\n\nUP / DOWN: "
-                             "volume\n\nIdle: hold UP for settings\nIdle: hold DOWN for Wi-Fi");
+    lv_label_set_text(guide, "Hold OK: talk\nRelease OK: send\nShort OK: settings\n\nUP / DOWN: "
+                             "volume\n\nSpeak after RECORDING");
     detail_label = label(14, 262, 212, 50, 0xa4b5be);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();
@@ -57,7 +58,7 @@ void ui_set(const char *state, const char *detail)
     if (!status_label || !bsp_lvgl_lock(100))
         return;
     // Keep a scanned setup page stable while background network events arrive.
-    if (!qr) {
+    if (!qr && !menu_visible) {
         if (strcmp(lv_label_get_text(status_label), state))
             lv_label_set_text(status_label, state);
         if (strcmp(lv_label_get_text(detail_label), detail))
@@ -96,7 +97,7 @@ void ui_tick(bool active)
     if (!bsp_lvgl_lock(10))
         return;
     int64_t now = esp_timer_get_time();
-    if (active || setup_visible) {
+    if (active || setup_visible || menu_visible) {
         last_touch = now;
         if (!screen_on) {
             screen_on = true;
@@ -156,6 +157,43 @@ void ui_show_guide(void)
         qr = NULL;
     }
     setup_visible = false;
+    menu_visible = false;
+    lv_obj_set_size(guide, 212, 128);
+    lv_label_set_text(guide, live_mode ? "Hold OK: start / interrupt\nShort OK: settings\n\nUP / "
+                                         "DOWN: volume\n\nSpeak after LISTENING"
+                                       : "Hold OK: talk\nRelease OK: send\nShort OK: "
+                                         "settings\n\nUP / DOWN: volume\n\nSpeak after RECORDING");
     lv_obj_set_hidden(guide, false);
+    bsp_lvgl_unlock();
+}
+
+void ui_mode(bool continuous)
+{
+    live_mode = continuous;
+}
+void ui_show_menu(const char *title, const char *const *items, int count, int selected,
+                  const char *hint)
+{
+    ui_wake();
+    if (!bsp_lvgl_lock(100))
+        return;
+    if (qr) {
+        lv_obj_delete(qr);
+        qr = NULL;
+    }
+    menu_visible = true;
+    setup_visible = false;
+    lv_obj_set_hidden(guide, false);
+    lv_obj_set_size(guide, 212, 144);
+    char text[300] = {0};
+    size_t used = 0;
+    int first = selected >= 6 ? selected - 5 : 0;
+    for (int i = first; i < count && i < first + 6; i++) {
+        used += snprintf(text + used, sizeof(text) - used, "%c %s%s", i == selected ? '>' : ' ',
+                         items[i], i < count - 1 ? "\n" : "");
+    }
+    lv_label_set_text(status_label, title);
+    lv_label_set_text(guide, text);
+    lv_label_set_text(detail_label, hint);
     bsp_lvgl_unlock();
 }

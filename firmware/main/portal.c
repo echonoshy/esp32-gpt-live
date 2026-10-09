@@ -29,7 +29,7 @@ bool portal_updating(void)
 void portal_arm(void)
 {
     if (device_busy() || portal_updating()) {
-        ui_set("END CHAT FIRST", "Hold OK, then hold UP");
+        ui_set("END CHAT FIRST", "Settings > Conversation > End");
         return;
     }
     atomic_store(&armed_until, esp_timer_get_time() / 1000000 + 300);
@@ -74,6 +74,12 @@ static esp_err_t info(httpd_req_t *r)
     cJSON_AddNumberToObject(j, "brightness", p.brightness);
     cJSON_AddNumberToObject(j, "screen_seconds", p.screen_seconds);
     cJSON_AddNumberToObject(j, "idle_seconds", p.idle_seconds);
+    cJSON_AddNumberToObject(j, "mode", p.mode);
+    cJSON_AddNumberToObject(j, "voice", p.voice);
+    cJSON_AddNumberToObject(j, "pace", p.pace);
+    cJSON_AddNumberToObject(j, "reply_length", p.reply_length);
+    cJSON_AddNumberToObject(j, "language", p.language);
+    cJSON_AddNumberToObject(j, "duplex", p.duplex);
     char *s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
     if (!s)
@@ -116,15 +122,18 @@ static esp_err_t save(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     cJSON *j = read_json(r);
-    settings_t p = {integer(j, "volume"), integer(j, "brightness"), integer(j, "screen_seconds"),
-                    integer(j, "idle_seconds")};
+    settings_t p = {integer(j, "volume"),         integer(j, "brightness"),
+                    integer(j, "screen_seconds"), integer(j, "idle_seconds"),
+                    integer(j, "mode"),           integer(j, "voice"),
+                    integer(j, "pace"),           integer(j, "reply_length"),
+                    integer(j, "language"),       integer(j, "duplex")};
     cJSON_Delete(j);
     esp_err_t e = settings_save(p);
     if (e != ESP_OK)
         return error(r, e == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error",
                      "保存失败，请检查设置后重试");
     device_apply_settings();
-    return error(r, "200 OK", "设置已保存");
+    return error(r, "200 OK", "设置已保存；对话模式、音色、说话风格和超时将在新对话生效");
 }
 static void restart(void *arg)
 {
@@ -136,7 +145,7 @@ static esp_err_t wifi(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     if (device_busy())
-        return error(r, "409 Conflict", "请先长按 OK 结束对话");
+        return error(r, "409 Conflict", "请先在设备设置的 Conversation 中选择 End chat");
     cJSON *j = read_json(r), *ssid = cJSON_GetObjectItem(j, "ssid"),
           *password = cJSON_GetObjectItem(j, "password");
     esp_err_t e = cJSON_IsString(ssid) && cJSON_IsString(password)
@@ -157,11 +166,11 @@ static esp_err_t update(httpd_req_t *r)
     if (!authorized(r))
         return error(r, "403 Forbidden", "请刷新设置页后再试");
     if (esp_timer_get_time() / 1000000 >= atomic_load(&armed_until))
-        return error(r, "403 Forbidden", "请先长按设备上键 3 秒开放升级");
+        return error(r, "403 Forbidden", "请在设备设置中进入 Device > Phone / firmware update");
     atomic_store(&updating, true);
     if (device_busy()) {
         atomic_store(&updating, false);
-        return error(r, "409 Conflict", "请先长按 OK 结束对话");
+        return error(r, "409 Conflict", "请先在设备设置的 Conversation 中选择 End chat");
     }
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     if (!slot || r->content_len < 1024 || r->content_len > slot->size) {

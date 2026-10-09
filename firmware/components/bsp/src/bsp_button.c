@@ -62,8 +62,8 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
             .max          = BTN_MV[i][1],
         };
         const button_config_t bc = {
-            // Long OK ends chat; long UP/DOWN opens settings/Wi-Fi while idle.
-            .long_press_time = i == BSP_BTN_OK ? 1500 : 3000,
+            // Short OK opens settings; hold OK records. UP/DOWN have no long shortcut.
+            .long_press_time = 500,
         };
         esp_err_t e = iot_button_new_adc_device(&bc, &ac, &s_btn[i]);
         if (e != ESP_OK || !s_btn[i]) {

@@ -26,6 +26,7 @@
 #include "settings.h"
 #include "portal.h"
 #include "device.h"
+#include "menu.h"
 
 #define SAMPLES 480
 #define FRAME_BYTES (SAMPLES * sizeof(int16_t))
@@ -47,7 +48,10 @@ typedef enum {
     CMD_SETTINGS,
     CMD_APPLY,
     CMD_DRAIN,
-    CMD_FAULT
+    CMD_FAULT,
+    CMD_PTT_BEGIN,
+    CMD_PTT_END,
+    CMD_NEW_START
 } command_type_t;
 typedef struct {
     command_type_t type;
@@ -61,7 +65,9 @@ static SemaphoreHandle_t send_lock;
 static atomic_bool connected, ready, recording, starting, wanted, awaiting_clear, end_pending,
     sticky_error;
 static atomic_bool boot_complete;
-static bool settings_open;
+static bool settings_open, menu_notice;
+static atomic_bool menu_active, live_mode, full_duplex, ptt_held, restart_pending, can_listen;
+static atomic_uint capture_started;
 static atomic_uint epoch, mic_frames, speaker_frames, dropped_frames, playback_refills;
 static atomic_int battery = -1, attempts;
 static atomic_uint listen_after, retry_at, started_at, ready_at, last_output_at;
@@ -94,12 +100,17 @@ const char *device_state(void)
         return "UPDATING";
     if (!atomic_load(&connected))
         return "CONNECTING";
+    if (atomic_load(&menu_active))
+        return "SETTINGS";
+    if (atomic_load(&recording))
+        return atomic_load(&live_mode) ? "LISTENING" : "RECORDING";
     if (atomic_load(&starting))
         return "CONNECTING VOICE";
-    if (atomic_load(&recording))
-        return "LISTENING";
-    if (atomic_load(&ready))
-        return "SPEAKING";
+    if (atomic_load(&ready)) {
+        if (uxQueueMessagesWaiting(playback) || atomic_load(&end_pending))
+            return "SPEAKING";
+        return "CHAT ACTIVE";
+    }
     return "IDLE";
 }
 void device_apply_settings(void)
@@ -128,12 +139,14 @@ static void idle_ui(void)
 {
     char ip[20], detail[96];
     voice_wifi_ip(ip, sizeof(ip));
-    snprintf(detail, sizeof(detail), "Speak after LISTENING\nhttp://%s", ip);
+    snprintf(detail, sizeof(detail), "Hold OK: %s\nhttp://%s",
+             settings_get().mode ? "start chat" : "talk", ip);
     ui_set("READY", detail);
 }
 static void retry(void)
 {
     mute();
+    atomic_store(&ptt_held, false);
     atomic_store(&ready, false);
     atomic_store(&starting, false);
     if (!atomic_load(&wanted))
@@ -142,7 +155,7 @@ static void retry(void)
     if (count > 3) {
         atomic_store(&wanted, false);
         atomic_store(&sticky_error, true);
-        ui_set("CONNECTION LOST", "Press OK to retry\nHold DOWN for Wi-Fi setup");
+        ui_set("CONNECTION LOST", "Hold OK to retry\nShort OK: network settings");
     } else {
         atomic_store(&retry_at, now_ms() + (2000 << (count - 1)));
         ui_set("RECONNECTING", "Please wait...");
@@ -164,6 +177,8 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         ESP_LOGI(TAG, "device bridge connected");
     } else if (event == WEBSOCKET_EVENT_DISCONNECTED) {
         atomic_store(&connected, false);
+        if (atomic_exchange(&restart_pending, false))
+            atomic_store(&wanted, true);
         if (atomic_load(&wanted))
             retry();
         else {
@@ -195,7 +210,8 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         if (opcode == 2 && received == FRAME_BYTES + 4) {
             uint32_t e;
             memcpy(&e, payload, 4);
-            if (e != atomic_load(&epoch) || !atomic_load(&ready) || atomic_load(&recording) ||
+            if (e != atomic_load(&epoch) || !atomic_load(&ready) ||
+                (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
                 atomic_load(&awaiting_clear))
                 return;
             if (xQueueSend(playback, payload, 0) != pdTRUE) {
@@ -217,7 +233,8 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     atomic_store(&starting, false);
                     atomic_store(&ready_at, now_ms());
                     atomic_store(&sticky_error, false);
-                } else if (!strcmp(state->valuestring, "connecting") && atomic_load(&wanted))
+                } else if (!strcmp(state->valuestring, "connecting") && atomic_load(&wanted) &&
+                           !atomic_load(&recording))
                     ui_set("CONNECTING VOICE", "Opening subscription voice...");
                 else if (!strcmp(state->valuestring, "idle")) {
                     bool active = atomic_load(&ready) || atomic_load(&starting);
@@ -229,19 +246,24 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     else if (!atomic_load(&wanted) && !atomic_load(&sticky_error))
                         idle_ui();
                 }
+            } else if (!strcmp(type, "stopped")) {
+                if (atomic_exchange(&restart_pending, false))
+                    enqueue(CMD_NEW_START, 0);
             } else if (!strcmp(type, "listen") && atomic_load(&ready) &&
                        !atomic_load(&awaiting_clear)) {
                 atomic_store(&epoch, e);
                 atomic_store(&end_pending, false);
                 atomic_store(&listen_after, microphone_deadline());
-                atomic_store(&recording, true);
-                ui_set("LISTENING", "Speak, then pause for reply");
+                atomic_store(&can_listen, true);
+                atomic_store(&recording, !atomic_load(&menu_active));
+                ui_set("LISTENING", "Hold OK: interrupt  OK: menu");
             } else if (!strcmp(type, "playback_begin") && atomic_load(&ready) &&
                        !atomic_load(&awaiting_clear)) {
-                atomic_store(&recording, false);
+                atomic_store(&can_listen, atomic_load(&full_duplex));
+                atomic_store(&recording, atomic_load(&full_duplex) && !atomic_load(&menu_active));
                 atomic_store(&end_pending, false);
                 atomic_store(&epoch, e);
-                ui_set("SPEAKING", "OK: interrupt and speak");
+                ui_set("SPEAKING", "Hold OK: interrupt  OK: menu");
             } else if (!strcmp(type, "playback_end") && atomic_load(&ready) &&
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
                 atomic_store(&end_pending, true);
@@ -249,8 +271,24 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 mute();
                 atomic_store(&epoch, e);
                 atomic_store(&listen_after, microphone_deadline());
-                atomic_store(&recording, true);
-                ui_set("LISTENING", "Continue speaking");
+                bool capture = atomic_load(&live_mode) || atomic_load(&ptt_held);
+                atomic_store(&can_listen, capture);
+                atomic_store(&recording, capture && !atomic_load(&menu_active));
+                if (capture)
+                    ui_set(atomic_load(&live_mode) ? "LISTENING" : "RECORDING",
+                           "Release OK to send in hold mode");
+            } else if (!strcmp(type, "waiting") && !atomic_load(&live_mode)) {
+                if (!atomic_load(&recording) && !atomic_load(&ptt_held)) {
+                    atomic_store(&epoch, e);
+                    atomic_store(&awaiting_clear, false);
+                    cJSON *too_long = cJSON_GetObjectItem(m, "too_long");
+                    ui_set(cJSON_IsTrue(too_long) ? "RECORDING TOO LONG" : "HOLD TO TALK",
+                           cJSON_IsTrue(too_long) ? "Not sent. Max 60 seconds"
+                                                  : "Hold OK, then speak\nShort OK: settings");
+                }
+            } else if (!strcmp(type, "submitted")) {
+                if (!atomic_load(&ptt_held))
+                    ui_set("SENDING", "Sending recorded speech...");
             } else if (!strcmp(type, "error")) {
                 cJSON *again = cJSON_GetObjectItem(m, "retryable"),
                       *message = cJSON_GetObjectItem(m, "code");
@@ -258,6 +296,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                     retry();
                 else {
                     atomic_store(&wanted, false);
+                    atomic_store(&ptt_held, false);
                     mute();
                     atomic_store(&ready, false);
                     atomic_store(&starting, false);
@@ -267,18 +306,19 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                                ? "Server login required"
                            : cJSON_IsString(message) && !strcmp(message->valuestring, "quota")
                                ? "Voice usage unavailable"
-                               : "Press OK to retry");
+                               : "Hold OK to retry");
                 }
             } else if (!strcmp(type, "ended")) {
                 cJSON *reason = cJSON_GetObjectItem(m, "reason");
                 atomic_store(&wanted, false);
+                atomic_store(&ptt_held, false);
                 mute();
                 atomic_store(&ready, false);
                 atomic_store(&starting, false);
                 atomic_store(&sticky_error, true);
                 ui_set("CHAT ENDED", cJSON_IsString(reason) && !strcmp(reason->valuestring, "limit")
-                                         ? "30 min limit. OK: new chat"
-                                         : "Idle timeout. OK: new chat");
+                                         ? "30 min limit. Hold OK: start"
+                                         : "Idle timeout. Hold OK: start");
             }
             cJSON_Delete(m);
         }
@@ -290,20 +330,82 @@ static void button(bsp_btn_t key, bsp_btn_ev_t event, void *user)
     if (event == BSP_BTN_PRESS) {
         held[key] = false;
         enqueue(CMD_WAKE, 0);
-    } else if (event == BSP_BTN_LONG) {
+    } else if (event == BSP_BTN_LONG && key == BSP_BTN_OK) {
         held[key] = true;
+        enqueue(CMD_PTT_BEGIN, 0);
+    } else if (event == BSP_BTN_RELEASE) {
         if (key == BSP_BTN_OK)
-            enqueue(CMD_STOP, 0);
-        else if (key == BSP_BTN_UP)
-            enqueue(device_busy() ? CMD_VOLUME_UP : CMD_SETTINGS, 0);
-        else if (key == BSP_BTN_DOWN)
-            enqueue(device_busy() && voice_wifi_connected() ? CMD_VOLUME_DOWN : CMD_WIFI, 0);
-    } else if (event == BSP_BTN_RELEASE && !held[key]) {
-        if (key == BSP_BTN_OK)
-            enqueue(CMD_OK, 0);
+            enqueue(held[key] ? CMD_PTT_END : CMD_OK, 0);
         else
             enqueue(key == BSP_BTN_UP ? CMD_VOLUME_UP : CMD_VOLUME_DOWN, 0);
     }
+}
+static void apply_device_settings(void)
+{
+    settings_t p = settings_get();
+    bsp_audio_set_volume(p.volume);
+    ui_battery(device_battery(), p.volume);
+    ui_wake();
+}
+static void show_home(void)
+{
+    bool live = device_busy() ? atomic_load(&live_mode) : settings_get().mode;
+    ui_mode(live);
+    ui_show_guide();
+    if (atomic_load(&recording))
+        ui_set(live ? "LISTENING" : "RECORDING", "Short OK: settings");
+    else if (atomic_load(&ready))
+        ui_set(live ? "CHAT ACTIVE" : "HOLD TO TALK", "Hold OK: talk / interrupt");
+    else
+        idle_ui();
+}
+static void start_session(void)
+{
+    if (!atomic_load(&wanted) || atomic_load(&starting) || atomic_load(&ready))
+        return;
+    if (!atomic_load(&connected)) {
+        ui_set("SERVER NOT CONNECTED", "Short OK: network settings");
+        return;
+    }
+    settings_t p = settings_get();
+    atomic_store(&live_mode, p.mode);
+    atomic_store(&full_duplex, p.mode && p.duplex);
+    atomic_store(&can_listen, false);
+    atomic_store(&starting, true);
+    atomic_store(&started_at, now_ms());
+    char start[320];
+    snprintf(start, sizeof(start),
+             "{\"type\":\"start\",\"protocol\":3,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
+             "\"reply_length\":%d,\"language\":%d,\"duplex\":%d,\"idle_seconds\":%d}",
+             p.mode ? "continuous" : "ptt", settings_voice(p.voice), p.pace, p.reply_length,
+             p.language, p.duplex, p.idle_seconds);
+    if (!send_json(start))
+        retry();
+    else
+        ui_set("CONNECTING VOICE", p.mode ? "Wait for LISTENING" : "Hold OK to record");
+    ui_mode(p.mode);
+    if (!atomic_load(&menu_active) && !settings_open)
+        ui_show_guide();
+}
+static void stop_session(void)
+{
+    atomic_store(&wanted, false);
+    atomic_store(&ptt_held, false);
+    atomic_store(&can_listen, false);
+    atomic_store(&ready, false);
+    atomic_store(&starting, false);
+    atomic_store(&sticky_error, false);
+    mute();
+    send_json("{\"type\":\"stop\"}");
+}
+static void close_menu(void)
+{
+    atomic_store(&menu_active, false);
+    if (atomic_load(&ready) && atomic_load(&live_mode)) {
+        send_json("{\"type\":\"resume\"}");
+        atomic_store(&recording, atomic_load(&can_listen));
+    }
+    show_home();
 }
 static void command_task(void *unused)
 {
@@ -312,60 +414,131 @@ static void command_task(void *unused)
         xQueueReceive(commands, &c, portMAX_DELAY);
         if (c.type != CMD_DRAIN && c.type != CMD_CONNECT)
             ui_wake();
-        if (portal_updating())
-            continue;
-        if (c.type == CMD_WAKE)
+        if (portal_updating() || c.type == CMD_WAKE)
             continue;
         if (voice_wifi_provisioning()) {
             if (c.type == CMD_OK || c.type == CMD_VOLUME_UP || c.type == CMD_VOLUME_DOWN)
                 voice_wifi_setup_next();
-            else if (c.type == CMD_STOP)
+            else if (c.type == CMD_PTT_BEGIN)
                 esp_restart();
             continue;
         }
-        if (settings_open && (c.type == CMD_OK || c.type == CMD_STOP)) {
-            settings_open = false;
-            ui_show_guide();
-            idle_ui();
+        if (settings_open &&
+            (c.type == CMD_OK || c.type == CMD_PTT_BEGIN || c.type == CMD_PTT_END)) {
+            if (c.type == CMD_OK) {
+                settings_open = false;
+                atomic_store(&menu_active, true);
+                menu_open();
+            }
             continue;
         }
-        if (c.type == CMD_OK && atomic_load(&ready)) {
-            mute();
-            atomic_store(&awaiting_clear, true);
-            ui_set("INTERRUPTING", "Wait for LISTENING");
-            if (!send_json("{\"type\":\"interrupt\"}"))
-                retry();
-        } else if (c.type == CMD_CONNECT || c.type == CMD_OK) {
-            if (c.type == CMD_OK) {
+        if (atomic_load(&menu_active) &&
+            (c.type == CMD_OK || c.type == CMD_VOLUME_UP || c.type == CMD_VOLUME_DOWN ||
+             c.type == CMD_PTT_BEGIN || c.type == CMD_PTT_END)) {
+            if (c.type == CMD_PTT_BEGIN || c.type == CMD_PTT_END)
+                continue;
+            if (menu_notice) {
+                menu_notice = false;
+                menu_refresh();
+                continue;
+            }
+            menu_action_t action = menu_key(c.type == CMD_OK          ? 0
+                                            : c.type == CMD_VOLUME_UP ? -1
+                                                                      : 1);
+            apply_device_settings();
+            if (action == MENU_CLOSE)
+                close_menu();
+            else if (action == MENU_NEW_CHAT) {
+                atomic_store(&menu_active, false);
+                ui_show_guide();
+                atomic_store(&restart_pending, atomic_load(&connected));
+                stop_session();
+                ui_set("NEW CONVERSATION", "Clearing previous context...");
+                if (!atomic_load(&connected))
+                    enqueue(CMD_NEW_START, 0);
+            } else if (action == MENU_STOP) {
+                stop_session();
+                close_menu();
+            } else if (action == MENU_WIFI) {
+                stop_session();
+                atomic_store(&menu_active, false);
+                ui_show_guide();
+                if (voice_wifi_request_setup() != ESP_OK)
+                    ui_set("SETUP UNAVAILABLE", "Please restart and retry");
+            } else if (action == MENU_PHONE) {
+                if (device_busy()) {
+                    menu_notice = true;
+                    const char *items[] = {"End chat first", "Conversation > End chat"};
+                    ui_show_menu("PHONE SETTINGS", items, 2, 0, "OK: return to menu");
+                } else if (voice_wifi_connected()) {
+                    atomic_store(&menu_active, false);
+                    settings_open = true;
+                    portal_arm();
+                }
+            }
+            continue;
+        }
+        if (c.type == CMD_OK || c.type == CMD_SETTINGS) {
+            atomic_store(&menu_active, true);
+            if (atomic_load(&live_mode)) {
+                atomic_store(&recording, false);
+                send_json("{\"type\":\"pause\"}");
+            }
+            menu_open();
+        } else if (c.type == CMD_NEW_START || c.type == CMD_CONNECT) {
+            if (c.type == CMD_NEW_START) {
                 atomic_store(&wanted, true);
                 atomic_store(&attempts, 0);
                 atomic_store(&sticky_error, false);
             }
-            if (atomic_load(&wanted) && !atomic_load(&starting) && !atomic_load(&ready) &&
-                atomic_load(&connected)) {
-                atomic_store(&starting, true);
-                atomic_store(&started_at, now_ms());
-                char start[128];
-                snprintf(start, sizeof(start),
-                         "{\"type\":\"start\",\"protocol\":2,\"mode\":\"continuous\",\"idle_"
-                         "seconds\":%d}",
-                         settings_get().idle_seconds);
-                if (!send_json(start))
+            start_session();
+        } else if (c.type == CMD_PTT_BEGIN) {
+            if (atomic_load(&restart_pending)) {
+                ui_set("NEW CONVERSATION", "Please wait...");
+                continue;
+            }
+            if (!atomic_load(&connected)) {
+                ui_set("SERVER NOT CONNECTED", "Short OK: network settings");
+                continue;
+            }
+            atomic_store(&wanted, true);
+            atomic_store(&attempts, 0);
+            atomic_store(&sticky_error, false);
+            bool was_ready = atomic_load(&ready);
+            start_session();
+            if (atomic_load(&live_mode)) {
+                if (was_ready) {
+                    mute();
+                    atomic_store(&awaiting_clear, true);
+                    ui_set("INTERRUPTING", "Wait for LISTENING");
+                    if (!send_json("{\"type\":\"interrupt\"}"))
+                        retry();
+                }
+            } else {
+                mute();
+                atomic_store(&ptt_held, true);
+                atomic_store(&capture_started, now_ms());
+                if (send_json("{\"type\":\"ptt_start\"}")) {
+                    atomic_store(&listen_after, microphone_deadline());
+                    atomic_store(&recording, true);
+                    ui_set("RECORDING", "Speak now. Release OK: send\nMaximum 60 seconds");
+                } else
+                    retry();
+            }
+        } else if (c.type == CMD_PTT_END) {
+            if (!atomic_load(&live_mode) && atomic_exchange(&ptt_held, false)) {
+                atomic_store(&recording, false);
+                if (!send_json("{\"type\":\"ptt_end\"}"))
                     retry();
                 else
-                    ui_set("CONNECTING VOICE", "Wait for LISTENING");
-            } else if (!atomic_load(&connected))
-                ui_set("WAITING FOR WI-FI", "Hold DOWN for phone setup");
+                    ui_set("SENDING", "Sending recorded speech...");
+            }
         } else if (c.type == CMD_STOP) {
-            atomic_store(&wanted, false);
-            atomic_store(&ready, false);
-            atomic_store(&starting, false);
-            atomic_store(&sticky_error, false);
-            mute();
-            send_json("{\"type\":\"stop\"}");
-            idle_ui();
+            stop_session();
+            show_home();
         } else if (c.type == CMD_DRAIN) {
-            if (atomic_load(&ready) && c.epoch == atomic_load(&epoch) && !atomic_load(&recording) &&
+            if (atomic_load(&ready) && c.epoch == atomic_load(&epoch) &&
+                (!atomic_load(&recording) || atomic_load(&full_duplex)) &&
                 !atomic_load(&awaiting_clear)) {
                 char message[80];
                 snprintf(message, sizeof(message), "{\"type\":\"playback_drained\",\"epoch\":%lu}",
@@ -380,30 +553,14 @@ static void command_task(void *unused)
                 p.volume = 100;
             if (p.volume < 0)
                 p.volume = 0;
-            if (settings_save(p) == ESP_OK) {
-                bsp_audio_set_volume(p.volume);
-                ui_battery(device_battery(), p.volume);
-            }
+            if (settings_save(p) == ESP_OK)
+                apply_device_settings();
         } else if (c.type == CMD_APPLY) {
-            bsp_audio_set_volume(settings_get().volume);
-            ui_battery(device_battery(), settings_get().volume);
-            ui_wake();
-        } else if (c.type == CMD_SETTINGS) {
-            if (voice_wifi_connected()) {
-                settings_open = true;
-                portal_arm();
-            } else
-                ui_set("WI-FI NOT CONNECTED", "Hold DOWN for phone setup");
-        } else if (c.type == CMD_WIFI) {
-            if (!device_busy() || !voice_wifi_connected()) {
-                atomic_store(&wanted, false);
-                atomic_store(&starting, false);
-                atomic_store(&ready, false);
-                mute();
-                send_json("{\"type\":\"stop\"}");
-                if (voice_wifi_request_setup() != ESP_OK)
-                    ui_set("SETUP UNAVAILABLE", "Please restart and retry");
-            }
+            apply_device_settings();
+            if (atomic_load(&menu_active))
+                menu_refresh();
+            else if (!device_busy())
+                show_home();
         } else if (c.type == CMD_FAULT) {
             send_json("{\"type\":\"stop\"}");
             retry();
@@ -445,7 +602,8 @@ static void speaker_task(void *unused)
         UBaseType_t queued = uxQueueMessagesWaiting(playback);
         bool have = false;
         memset(&frame, 0, sizeof(frame));
-        if (!atomic_load(&ready) || atomic_load(&recording) || atomic_load(&awaiting_clear)) {
+        if (!atomic_load(&ready) || (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
+            atomic_load(&awaiting_clear)) {
             playing = false;
             prefill_since = 0;
         } else {
@@ -469,7 +627,8 @@ static void speaker_task(void *unused)
                 }
             }
         }
-        if (have && !atomic_load(&recording) && !atomic_load(&awaiting_clear)) {
+        if (have && (!atomic_load(&recording) || atomic_load(&full_duplex)) &&
+            !atomic_load(&awaiting_clear)) {
             last_write = now;
             atomic_store(&last_output_at, now);
             atomic_fetch_add(&speaker_frames, 1);
@@ -531,9 +690,9 @@ static void console_task(void *unused)
             continue;
         }
         if (!strcmp(line, "connect"))
-            enqueue(CMD_OK, 0);
+            enqueue(CMD_NEW_START, 0);
         else if (!strcmp(line, "interrupt"))
-            enqueue(CMD_OK, 0);
+            enqueue(CMD_PTT_BEGIN, 0);
         else if (!strcmp(line, "stop"))
             enqueue(CMD_STOP, 0);
     }
@@ -564,6 +723,9 @@ static void health_task(void *unused)
                 atomic_store(&battery, bsp_battery_soc());
             ui_battery(device_battery(), settings_get().volume);
         }
+        if (atomic_load(&ptt_held) && now_ms() - atomic_load(&capture_started) > 60000) {
+            enqueue(CMD_PTT_END, 0);
+        }
         if (atomic_load(&starting) && now_ms() - atomic_load(&started_at) > 55000) {
             atomic_store(&started_at, now_ms());
             enqueue(CMD_FAULT, 0);
@@ -591,7 +753,10 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     settings_init();
+    atomic_store(&live_mode, settings_get().mode);
     ui_init();
+    ui_mode(settings_get().mode);
+    ui_show_guide();
     playback = xQueueCreate(PLAYBACK_FRAMES, sizeof(audio_frame_t));
     commands = xQueueCreate(12, sizeof(command_t));
     send_lock = xSemaphoreCreateMutex();
@@ -600,7 +765,7 @@ void app_main(void)
     ESP_ERROR_CHECK(bsp_audio_set_format(24000, 16, 1));
     bsp_audio_set_volume(settings_get().volume);
     ESP_ERROR_CHECK(bsp_button_init(button, NULL));
-    ESP_ERROR_CHECK(xTaskCreate(command_task, "controls", 4096, NULL, 5, NULL) == pdPASS
+    ESP_ERROR_CHECK(xTaskCreate(command_task, "controls", 6144, NULL, 5, NULL) == pdPASS
                         ? ESP_OK
                         : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(microphone_task, "mic", 4096, NULL, 6, NULL) == pdPASS

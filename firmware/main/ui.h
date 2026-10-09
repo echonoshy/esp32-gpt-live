@@ -8,3 +8,7 @@ void ui_tick(bool active);
 void ui_show_setup(const char *ssid, bool website);
 void ui_show_settings(const char *url);
 void ui_show_guide(void);
+
+void ui_show_menu(const char *title, const char *const *items, int count, int selected,
+                  const char *hint);
+void ui_mode(bool continuous);
