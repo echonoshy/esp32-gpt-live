@@ -41,7 +41,7 @@ int __real_esp_transport_ws_send_raw(void *t, int op, const char *p, int n, int 
     count = c.c_int.in_dll(lib, 'count')
     size = c.c_int.in_dll(lib, 'captured_size')
     capture = (c.c_ubyte*1208).in_dll(lib, 'captured')
-    for op, n in [(0x89, 0), (0x8a, 6), (0x88, 2), (0x81, 125), (0x82, 126), (0x82, 244), (0x82, 1200), (0x02, 244), (0x80, 244)]:
+    for op, n in [(0x89, 0), (0x8a, 6), (0x88, 2), (0x81, 125), (0x82, 126), (0x82, 244), (0x82, 976), (0x82, 1200), (0x02, 244), (0x80, 244)]:
         payload = bytes(i % 256 for i in range(n))
         before = count.value
         assert send(1, op, payload, n, 1000) == n

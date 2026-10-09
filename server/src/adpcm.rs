@@ -78,9 +78,36 @@ pub fn decode(packet: &[u8]) -> Option<Vec<u8>> {
     }
     Some(pcm)
 }
+/// Protocol 7 batches at most four independent packets; older clients send one.
+pub fn decode_uplink(bytes: &[u8], batched: bool) -> Option<Vec<Vec<u8>>> {
+    let count = bytes.len() / PACKET_BYTES;
+    if count == 0
+        || count > if batched { 4 } else { 1 }
+        || !bytes.len().is_multiple_of(PACKET_BYTES)
+    {
+        return None;
+    }
+    bytes.chunks_exact(PACKET_BYTES).map(decode).collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_batches_keep_packet_boundaries_and_reject_bad_tails() {
+        let mut bytes = vec![0; PACKET_BYTES * 4];
+        bytes[PACKET_BYTES] = 0x20;
+        let frames = decode_uplink(&bytes, true).unwrap();
+        assert_eq!(frames.len(), 4);
+        for (packet, pcm) in bytes.chunks_exact(PACKET_BYTES).zip(frames) {
+            assert_eq!(decode(packet).unwrap(), pcm);
+        }
+        assert!(decode_uplink(&bytes, false).is_none());
+        assert!(decode_uplink(&[], true).is_none());
+        assert!(decode_uplink(&bytes[..bytes.len() - 1], true).is_none());
+        assert!(decode_uplink(&vec![0; PACKET_BYTES * 5], true).is_none());
+        bytes[PACKET_BYTES * 3 + 2] = 89;
+        assert!(decode_uplink(&bytes, true).is_none());
+    }
     fn unhex(s: &str) -> Vec<u8> {
         s.as_bytes()
             .chunks_exact(2)

@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
 
 async fn health(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":6,"version":env!("CARGO_PKG_VERSION")}),
+        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":7,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 
@@ -166,36 +166,48 @@ async fn device_upgrade(
 
 async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let (mut sink, mut source) = socket.split();
-    let (out, mut outgoing) = mpsc::channel(32);
+    let (out, mut outgoing) = mpsc::channel(128);
     let mut session: Option<(Tx, tokio::task::JoinHandle<()>)> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut last_rx = tokio::time::Instant::now();
     let mut compressed = false;
+    let mut batched = false;
     let mut output_codec = adpcm::Encoder::default();
     let _ = sink.send(status("idle")).await;
     tracing::info!("device connected");
-    loop {
+    'device: loop {
         tokio::select! {
             frame=source.next()=>{
-                let Some(Ok(frame))=frame else {break};
+                let frame=match frame {
+                    Some(Ok(frame))=>frame,
+                    Some(Err(error))=>{tracing::warn!(%error,"device socket read failed");break},
+                    None=>{tracing::info!("device socket EOF");break},
+                };
                 last_rx=tokio::time::Instant::now();
                 // In-flight microphone frames can arrive after the session receiver closes.
                 // They must not tear down an otherwise healthy device connection.
                 if session.as_ref().is_some_and(|(tx,_)|tx.is_closed()) {session=None}
                 match frame {
-                    Message::Close(_)=>{let _=sink.flush().await;break},
+                    Message::Close(_)=>{tracing::info!("device requested socket close");let _=sink.flush().await;break},
                     Message::Ping(p)=>{if sink.send(Message::Pong(p)).await.is_err(){break}},
                     Message::Pong(_)=>{},
                     Message::Binary(bytes)=>{
-                        let bytes = if compressed {
-                            let Some(decoded)=adpcm::decode(&bytes) else {break};
-                            decoded.into()
+                        let frames = if compressed {
+                            let Some(frames)=adpcm::decode_uplink(&bytes,batched) else {
+                                tracing::warn!(bytes=bytes.len(),"invalid device ADPCM payload");break
+                            };
+                            frames
                         } else {
-                            if !valid_pcm(&bytes) {break}
-                            bytes
+                            if !valid_pcm(&bytes) {tracing::warn!("invalid device PCM payload");break}
+                            vec![bytes.to_vec()]
                         };
-                        if let Some((tx,_))=&session {
-                            if send(tx,Message::Binary(bytes)).is_err(){break}
+                        for frame in frames {
+                            if let Some((tx,_))=&session {
+                                if send(tx,Message::Binary(frame.into())).is_err(){
+                                    tracing::warn!("device input queue full or session closed");
+                                    break 'device
+                                }
+                            }
                         }
                     },
                     Message::Text(s)=>{
@@ -205,6 +217,7 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                             if session.as_ref().is_some_and(|(_,task)|task.is_finished()) {session=None}
                             if session.is_none() {
                                 compressed=v["protocol"].as_u64().unwrap_or(1)>=5;
+                                batched=v["protocol"].as_u64().unwrap_or(1)>=7;
                                 output_codec=adpcm::Encoder::default();
                                 // Bounded startup backlog: preserve a held utterance while Codex connects.
                                 let (tx,rx)=mpsc::channel(if v["mode"]=="continuous" && v["protocol"].as_u64().unwrap_or(1)<4 {32} else {ptt::MAX_FRAMES + 8});
@@ -247,10 +260,14 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                     },
                     message=>message
                 };
-                if !matches!(tokio::time::timeout(Duration::from_secs(2),sink.send(message)).await,Ok(Ok(()))){break}
+                match tokio::time::timeout(Duration::from_secs(5),sink.send(message)).await {
+                    Ok(Ok(()))=>{},
+                    Ok(Err(error))=>{tracing::warn!(%error,"device socket write failed");break},
+                    Err(_)=>{tracing::warn!("device socket write stalled for 5 seconds");break},
+                }
             },
             _=heartbeat.tick()=>{
-                if last_rx.elapsed()>Duration::from_secs(45){break}
+                if last_rx.elapsed()>Duration::from_secs(45){tracing::warn!("device heartbeat receive timeout");break}
                 if sink.send(Message::Ping(Vec::new().into())).await.is_err(){break}
             }
         }

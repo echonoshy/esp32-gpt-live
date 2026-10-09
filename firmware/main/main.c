@@ -32,18 +32,18 @@
 #include "controls.h"
 #include "adpcm.h"
 #include "ws_send.h"
+#include "audio_transport.h"
 
 #define SAMPLES 480
 #define FRAME_BYTES (SAMPLES * sizeof(int16_t))
-#define PLAYBACK_FRAMES 32
-#define PLAYBACK_PREFILL 12
 #define ECHO_GUARD_MS 180
 #define PTT_HOLD_MS 200
 #define PREROLL_FRAMES 16
 typedef struct {
     uint32_t epoch, received_at;
-    int16_t samples[SAMPLES];
+    uint8_t packet[ADPCM_BYTES];
 } audio_frame_t;
+_Static_assert(sizeof(audio_frame_t) * PLAYBACK_FRAMES <= 33 * 1024, "playback RAM budget");
 typedef enum {
     CMD_CONNECT,
     CMD_OK,
@@ -86,6 +86,7 @@ static atomic_uint released_at;
 static atomic_bool output_timing_pending;
 static uint8_t preroll[PREROLL_FRAMES][ADPCM_BYTES];
 static adpcm_state_t input_codec;
+static uplink_batch_t uplink;    // Protected by send_lock, including control boundaries.
 static unsigned preroll_count;   // Protected by send_lock.
 static unsigned captured_frames; // Protected by send_lock; includes the pre-roll.
 static atomic_bool menu_active, live_mode, full_duplex, ptt_held, restart_pending, can_listen;
@@ -97,7 +98,8 @@ static atomic_bool netcheck;
 static atomic_uint alloc_failures, alloc_failed_size, send_max_ms, send_slow, send_errors;
 static atomic_uint mic_read_max_ms, mic_read_errors, receive_gap_max_ms, receive_last_ms;
 static atomic_uint netcheck_runs, playback_age_max_ms;
-static atomic_uint wifi_disconnects, wifi_last_reason;
+static atomic_uint wifi_disconnects, wifi_last_reason, ws_disconnects, ws_errors;
+static atomic_uint playback_target, send_packets;
 static void wifi_diagnostic(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -196,6 +198,11 @@ void device_add_diagnostics(cJSON *root)
     cJSON_AddNumberToObject(j, "playback_refills", atomic_load(&playback_refills));
     cJSON_AddNumberToObject(j, "playback_age_max_ms", atomic_load(&playback_age_max_ms));
     cJSON_AddNumberToObject(j, "playback_queued", uxQueueMessagesWaiting(playback));
+    cJSON_AddNumberToObject(j, "playback_capacity_ms", PLAYBACK_FRAMES * 20);
+    cJSON_AddNumberToObject(j, "playback_target_ms", atomic_load(&playback_target) * 20);
+    cJSON_AddNumberToObject(j, "send_packets", atomic_load(&send_packets));
+    cJSON_AddNumberToObject(j, "ws_disconnects", atomic_load(&ws_disconnects));
+    cJSON_AddNumberToObject(j, "ws_errors", atomic_load(&ws_errors));
     cJSON_AddNumberToObject(j, "button_mv", bsp_button_read_mv());
     cJSON_AddNumberToObject(j, "button_keys", bsp_button_read_keys());
     cJSON_AddBoolToObject(j, "live", atomic_load(&live_mode));
@@ -210,18 +217,24 @@ void device_add_diagnostics(cJSON *root)
         cJSON_AddNumberToObject(j, "wifi_rssi", ap.rssi);
 }
 // Call only while holding send_lock. Diagnostics cover both pre-roll and normal audio.
-static int send_wire(const uint8_t *packet)
+static bool send_wire(const uint8_t *packets, unsigned frames)
 {
+    unsigned bytes = frames * ADPCM_BYTES;
     uint32_t before = now_ms();
-    int sent =
-        esp_websocket_client_send_bin(ws, (const char *)packet, ADPCM_BYTES, pdMS_TO_TICKS(1000));
+    int sent = esp_websocket_client_send_bin(ws, (const char *)packets, bytes, pdMS_TO_TICKS(3000));
     uint32_t elapsed = now_ms() - before;
     maximum(&send_max_ms, elapsed);
-    if (elapsed > 40)
+    if (elapsed > 80)
         atomic_fetch_add(&send_slow, 1);
-    if (sent != ADPCM_BYTES)
+    if (sent != (int)bytes) {
         atomic_fetch_add(&send_errors, 1);
-    return sent;
+        ESP_LOGW(TAG, "audio send failed frames=%u elapsed_ms=%lu sent=%d", frames,
+                 (unsigned long)elapsed, sent);
+        return false;
+    }
+    atomic_fetch_add(&send_packets, 1);
+    atomic_fetch_add(&mic_frames, frames);
+    return true;
 }
 static bool send_json(const char *message)
 {
@@ -229,7 +242,18 @@ static bool send_json(const char *message)
         return false;
     size_t n = strlen(message);
     xSemaphoreTake(send_lock, portMAX_DELAY);
-    int sent = esp_websocket_client_send_text(ws, message, n, pdMS_TO_TICKS(1000));
+    // Release must follow the final partial audio batch. Cancellation instead discards it.
+    if (!strcmp(message, "{\"type\":\"ptt_end\"}")) {
+        if (!uplink_flush(&uplink, send_wire)) {
+            xSemaphoreGive(send_lock);
+            return false;
+        }
+    } else if (strstr(message, "\"type\":\"stop\"") || strstr(message, "\"type\":\"cancel\"") ||
+               strstr(message, "\"type\":\"mode\"") || strstr(message, "\"type\":\"start\"") ||
+               strstr(message, "\"type\":\"probe\"") || strstr(message, "\"type\":\"ptt_start\"")) {
+        uplink.count = 0;
+    }
+    int sent = esp_websocket_client_send_text(ws, message, n, pdMS_TO_TICKS(3000));
     xSemaphoreGive(send_lock);
     return sent == n;
 }
@@ -249,6 +273,7 @@ static void retry(void)
 {
     atomic_store(&capture_pending, false);
     atomic_store(&output_timing_pending, false);
+    atomic_store(&interaction_active, false);
     mute();
     atomic_store(&ptt_held, false);
     atomic_store(&ready, false);
@@ -279,7 +304,14 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         } else if (!atomic_load(&sticky_error))
             idle_ui();
         ESP_LOGI(TAG, "device bridge connected");
+    } else if (event == WEBSOCKET_EVENT_ERROR) {
+        atomic_fetch_add(&ws_errors, 1);
     } else if (event == WEBSOCKET_EVENT_DISCONNECTED) {
+        atomic_fetch_add(&ws_disconnects, 1);
+        ESP_LOGW(TAG, "bridge disconnected send_errors=%u send_max_ms=%u heap=%lu",
+                 atomic_load(&send_errors), atomic_load(&send_max_ms),
+                 (unsigned long)esp_get_free_heap_size());
+        atomic_store(&interaction_active, false);
         atomic_store(&connected, false);
         if (atomic_exchange(&restart_pending, false))
             atomic_store(&wanted, true);
@@ -321,14 +353,16 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
                 atomic_load(&awaiting_clear))
                 return;
-            audio_frame_t decoded = {.epoch = e, .received_at = now};
-            if (!adpcm_decode((const uint8_t *)payload + 4, ADPCM_BYTES, decoded.samples))
+            audio_frame_t compressed = {.epoch = e, .received_at = now};
+            const uint8_t *packet = (const uint8_t *)payload + 4;
+            if (packet[2] > 88 || packet[3] != 0)
                 return;
-            if (xQueueSend(playback, &decoded, 0) != pdTRUE) {
+            memcpy(compressed.packet, packet, ADPCM_BYTES);
+            if (xQueueSend(playback, &compressed, 0) != pdTRUE) {
                 audio_frame_t discarded;
                 xQueueReceive(playback, &discarded, 0);
                 atomic_fetch_add(&dropped_frames, 1);
-                xQueueSend(playback, &decoded, 0);
+                xQueueSend(playback, &compressed, 0);
             }
         } else if (opcode == 1) {
             payload[received] = 0;
@@ -521,7 +555,7 @@ static void start_session(void)
     atomic_store(&started_at, now_ms());
     char start[320];
     snprintf(start, sizeof(start),
-             "{\"type\":\"start\",\"protocol\":6,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
+             "{\"type\":\"start\",\"protocol\":7,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
              "\"reply_length\":%d,\"language\":%d,\"duplex\":%d,\"idle_seconds\":%d}",
              live ? "continuous" : "ptt", settings_voice(p.voice), p.pace, p.reply_length,
              p.language, 1, p.idle_seconds);
@@ -578,7 +612,7 @@ static void command_task(void *unused)
             atomic_store(&full_duplex, true);
             atomic_store(&receive_last_ms, 0);
             atomic_fetch_add(&netcheck_runs, 1);
-            send_json("{\"type\":\"probe\",\"protocol\":5}");
+            send_json("{\"type\":\"probe\",\"protocol\":7}");
             continue;
         }
         if (c.type == CMD_NETCHECK_DONE ||
@@ -700,6 +734,7 @@ static void command_task(void *unused)
             xSemaphoreTake(send_lock, portMAX_DELAY);
             preroll_count = 0;
             captured_frames = 0;
+            uplink.count = 0;
             input_codec = (adpcm_state_t){0};
             atomic_store(&capture_started, now_ms());
             atomic_store(&accept_requested, false);
@@ -727,12 +762,12 @@ static void command_task(void *unused)
                 xSemaphoreTake(send_lock, portMAX_DELAY);
                 bool ok = true;
                 for (unsigned i = 0; i < preroll_count && ok; i++) {
-                    ok = send_wire(preroll[i]) == ADPCM_BYTES;
-                    if (ok) {
-                        atomic_fetch_add(&mic_frames, 1);
+                    ok = uplink_append(&uplink, preroll[i], send_wire);
+                    if (ok)
                         captured_frames++;
-                    }
                 }
+                if (ok)
+                    ok = uplink_flush(&uplink, send_wire);
                 preroll_count = 0;
                 atomic_store(&capture_pending, false);
                 atomic_store(&listen_after, now_ms());
@@ -840,9 +875,7 @@ static void microphone_task(void *unused)
                        sizeof(frame)); // Never transmit microphone samples during a probe.
             uint8_t packet[ADPCM_BYTES];
             adpcm_encode(&input_codec, frame, packet);
-            int sent = send_wire(packet);
-            if (sent == ADPCM_BYTES) {
-                atomic_fetch_add(&mic_frames, 1);
+            if (uplink_append(&uplink, packet, send_wire)) {
                 if (atomic_load(&ptt_held) && ++captured_frames >= 3000) {
                     atomic_store(&recording, false);
                     enqueue(CMD_PTT_END, 0);
@@ -858,59 +891,48 @@ static void microphone_task(void *unused)
 static void speaker_task(void *unused)
 {
     audio_frame_t frame;
-    uint32_t last_write = 0, prefill_since = 0;
-    bool playing = false;
+    int16_t samples[SAMPLES];
+    uint32_t last_write = 0;
+    playback_gate_t gate = {0};
     for (;;) {
-        uint32_t now = now_ms();
+        uint32_t now = now_ms(), current_epoch = atomic_load(&epoch);
+        bool live = atomic_load(&live_mode), ended = atomic_load(&end_pending);
         UBaseType_t queued = uxQueueMessagesWaiting(playback);
         bool have = false;
-        // Bound live latency after a network burst; never accumulate seconds of stale speech.
-        if (atomic_load(&live_mode) && queued > 24) {
-            while (uxQueueMessagesWaiting(playback) > PLAYBACK_PREFILL) {
+        // Live keeps its low latency policy; PTT retains a larger ordered speech buffer.
+        if (live && queued > 24) {
+            while (uxQueueMessagesWaiting(playback) > PLAYBACK_LIVE_PREFILL) {
                 if (xQueueReceive(playback, &frame, 0) != pdTRUE)
                     break;
                 atomic_fetch_add(&dropped_frames, 1);
             }
             queued = uxQueueMessagesWaiting(playback);
         }
-        memset(&frame, 0, sizeof(frame));
+        if (gate.epoch != current_epoch || !gate.target)
+            playback_gate_reset(&gate, current_epoch, live);
+        memset(samples, 0, sizeof(samples));
         if (!atomic_load(&ready) || (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
             atomic_load(&awaiting_clear)) {
-            playing = false;
-            prefill_since = 0;
+            playback_gate_reset(&gate, current_epoch, live);
         } else {
-            if (!playing && queued) {
-                if (!prefill_since)
-                    prefill_since = now;
-                if (queued >= PLAYBACK_PREFILL || now - prefill_since >= 350 ||
-                    atomic_load(&end_pending)) {
-                    playing = true;
-                    prefill_since = 0;
-                }
-            }
-            if (playing) {
-                if (xQueueReceive(playback, &frame, 0) == pdTRUE)
-                    have = frame.epoch == atomic_load(&epoch);
-                else {
-                    playing = false;
-                    prefill_since = 0;
-                    if (now - last_write < 150 && !atomic_load(&end_pending))
-                        atomic_fetch_add(&playback_refills, 1);
-                }
-            }
+            if (gate.playing && !queued && !ended && now - last_write < 150)
+                atomic_fetch_add(&playback_refills, 1);
+            if (playback_gate_ready(&gate, queued, live, ended, now) &&
+                xQueueReceive(playback, &frame, 0) == pdTRUE)
+                have = frame.epoch == atomic_load(&epoch);
         }
+        atomic_store(&playback_target, gate.target);
         if (have && frame.epoch == atomic_load(&epoch) &&
             (!atomic_load(&recording) || atomic_load(&full_duplex)) &&
-            !atomic_load(&awaiting_clear)) {
+            !atomic_load(&awaiting_clear) && adpcm_decode(frame.packet, ADPCM_BYTES, samples)) {
             maximum(&playback_age_max_ms, now - frame.received_at);
             last_write = now;
             atomic_store(&last_output_at, now);
             atomic_fetch_add(&speaker_frames, 1);
             if (atomic_exchange(&output_timing_pending, false))
                 ESP_LOGI(TAG, "PTT release_to_speaker_ms=%u", now - atomic_load(&released_at));
-        } else
-            memset(frame.samples, 0, FRAME_BYTES);
-        if (bsp_audio_write(frame.samples, FRAME_BYTES) != ESP_OK)
+        }
+        if (bsp_audio_write(samples, FRAME_BYTES) != ESP_OK)
             vTaskDelay(pdMS_TO_TICKS(20));
         // Drain the queue AND the 60 ms I2S DMA buffer before reopening the microphone.
         if (atomic_load(&end_pending) && uxQueueMessagesWaiting(playback) == 0 &&

@@ -315,6 +315,22 @@ async def check():
                 assert all(len(m) == 248 and m[6] <= 88 and m[7] == 0 for m in messages if isinstance(m, bytes))
                 await send('stop')
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                # Protocol 7 splits batched uplink into ordered 20 ms PCM frames.
+                messages.clear()
+                count = len(events('audio'))
+                await send('start', protocol=7, mode='ptt')
+                await until(lambda: any(isinstance(m, dict) and m.get('state') == 'ready' for m in messages))
+                await send('ptt_start')
+                for frames in (4, 4, 3):
+                    await ws.send(packet * frames)
+                await send('ptt_end')
+                await until(lambda: len(events('audio')) == count + 11)
+                assert all(e['enabled'] and e['size'] == 960 for e in events('audio')[count:])
+                await until(lambda: any(isinstance(m, bytes) for m in messages))
+                assert all(len(m) == 248 for m in messages if isinstance(m, bytes))
+                await send('stop')
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                print('PASS: protocol 7 batches and final 3-frame tail arrive before release; older protocols remain supported')
                 # A silent probe must never create a Codex or media session.
                 sessions_before_probe = len(events('session'))
                 messages.clear()

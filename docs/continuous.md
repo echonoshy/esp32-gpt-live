@@ -1,4 +1,4 @@
-# 语音协议 v6 与多级设置
+# 语音协议 v7 与多级设置
 
 ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留畅聊；不引入唤醒词、长期记忆和文件管理。
 
@@ -7,7 +7,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 设备发送：
 
 ```json
-{"type":"start","protocol":6,"mode":"ptt","voice":"cove","pace":0,"reply_length":0,"language":0,"duplex":1,"idle_seconds":180}
+{"type":"start","protocol":7,"mode":"ptt","voice":"cove","pace":0,"reply_length":0,"language":0,"duplex":1,"idle_seconds":180}
 ```
 
 - `mode`：`ptt` 或 `continuous`；畅聊始终全双工。`duplex` 仅保留旧字段兼容，不再关闭畅聊输入。
@@ -18,7 +18,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 
 当前订阅桥使用 Codex CLI 0.159.2。`thread/realtime/listVoices` 返回 v1/v2 两组；该版本 `core/src/realtime_conversation.rs` 的 `validate_realtime_voice` 将 **V3 映射到 V1**，不能把公开 API 的音色直接填入。来源：[对应版本实现](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/realtime_conversation.rs)。
 
-协议 v5/v6 上行每帧 244 bytes ADPCM，下行前置 `u32 little-endian epoch`，共 248 bytes；媒体桥内部继续使用 960 bytes PCM（24 kHz、s16le、mono、20 ms）。旧协议 v2/v3/v4 为 960/964 bytes PCM。过期音频丢弃。旧协议 1 的 PTT 脚本继续接收未加代号的 960 字节音频和转写。协议 1/3 继续兼容原先松手后才重放输入的行为。
+协议 v7 的每条上行消息含 1–4 个独立的 244 bytes ADPCM 包（20–80 ms），服务端先校验完整批次、再按原顺序拆成 20 ms 帧，松开 OK 时先发送最后不足 4 帧的尾包，再发送 `ptt_end`。v5/v6 仍每条消息一个包。下行前置 `u32 little-endian epoch`，共 248 bytes；媒体桥内部继续使用 960 bytes PCM（24 kHz、s16le、mono、20 ms）。旧协议 v2/v3/v4 为 960/964 bytes PCM。过期音频丢弃。旧协议 1 的 PTT 脚本继续接收未加代号的 960 字节音频和转写。协议 1/3 继续兼容原先松手后才重放输入的行为。
 
 ## 按住说话
 
@@ -30,7 +30,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 
 一轮最多 3000 个输入帧，即 60 秒，计数包括已发送的帧；固件达到此值自动松手，服务器拒绝超限。输入积压和回复缓冲各有 3000 帧上限，单份约 2.88 MB，在服务器分配。Live 此通道没有手动 commit/response-create，PTT 的松手控制的是应用播放，不保证模型到松手才开始推理。它消除了旧版完整录音重放的线性等待，首次接通和上游响应耗时仍然存在。
 
-日志仅记录耗时／数量：媒体建立耗时、松手时输入与回复积压、首个模型音频、首个下发音频，以及设备的 `release_to_speaker_ms`。不会记录录音或转写。服务器下发时间不含设备 240 ms 起播缓冲。
+日志仅记录耗时／数量：媒体建立耗时、松手时输入与回复积压、首个模型音频、首个下发音频，以及设备的 `release_to_speaker_ms`。不会记录录音或转写。服务器下发时间不含设备起播缓冲；PTT 通常为 800 ms，欠载后本段为 1200 ms，短回复带结束标记则直接排空。容量 2.56 秒不代表每次等待 2.56 秒。
 
 ## 持续双向畅聊
 
@@ -39,7 +39,7 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 3. 用户增量转写仅更新内部会话状态，不自动清理音频，也不向模型追加停止指令。自然插话由 GPT-Live 根据连续音轨处理。
 4. 输出能量和 650 ms 计时仅用于屏幕活动状态，不控制畅聊输入或输出。用户已说话且模型尚未回复时保留交互活动状态，短按 OK 仍可停止。
 5. 进入菜单发送 pause，暂停输入和新增下行；已进入设备队列的短段可能播完。返回 resume。既有 WebRTC 和 Codex thread 保持，模型输入端的音频时钟仍输出静音。
-6. 设备继续使用固定 32 帧容量与 12 帧预缓冲；畅聊积压超过 24 帧时丢弃最旧部分至 12 帧，避免网络恢复后播放越来越迟。诊断记录丢帧和入队到播放的最大年龄；不是网络端到端延迟。
+6. 设备使用固定 128 帧压缩队列，畅聊仍用 12 帧预缓冲；畅聊积压超过 24 帧时丢弃最旧部分至 12 帧，避免网络恢复后播放越来越迟。诊断记录丢帧和入队到播放的最大年龄；不是网络端到端延迟。
 
 ## 主动停止与模式切换
 
