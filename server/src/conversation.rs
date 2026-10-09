@@ -11,7 +11,6 @@ pub struct Conversation {
     pub epoch: u32,
     pub phase: Phase,
     last_voice: u64,
-    interrupted_at: u64,
     quiet_since: Option<u64>,
     user_after_interrupt: bool,
     quiet_boundary: bool,
@@ -30,19 +29,18 @@ impl Conversation {
             epoch: 0,
             phase: Phase::Listening,
             last_voice: 0,
-            interrupted_at: 0,
             quiet_since: None,
             user_after_interrupt: false,
             quiet_boundary: false,
         }
     }
+    #[cfg(test)]
     pub fn listening(&self) -> bool {
         matches!(self.phase, Phase::Listening | Phase::Interrupted)
     }
-    pub fn interrupt(&mut self, now: u64) -> u32 {
+    pub fn interrupt(&mut self, _now: u64) -> u32 {
         self.epoch = self.epoch.wrapping_add(1);
         self.phase = Phase::Interrupted;
-        self.interrupted_at = now;
         self.quiet_since = None;
         self.user_after_interrupt = false;
         self.quiet_boundary = false;
@@ -97,9 +95,6 @@ impl Conversation {
             return true;
         }
         false
-    }
-    pub fn interrupt_stalled(&self, now: u64) -> bool {
-        self.phase == Phase::Interrupted && now.saturating_sub(self.interrupted_at) > 30000
     }
 }
 

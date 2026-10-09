@@ -38,13 +38,16 @@ void ui_show_menu(const char *t, const char *const *items, int count, int select
 }
 int main(void)
 {
-    menu_open();
+    menu_open(false);
+    assert(menu_key(0) == MENU_LIVE);
     assert(menu_back() == MENU_CLOSE);
+    menu_key(1);
     menu_key(0); // Conversation
     menu_key(0); // New chat confirmation
     assert(!strcmp(title, "CLEAR CONTEXT?"));
     assert(menu_back() == MENU_NONE && !strcmp(title, "CONVERSATION"));
     menu_back();
+    menu_key(1);
     menu_key(1);
     menu_key(0);
     menu_key(0); // Voice > Choose voice
@@ -54,12 +57,14 @@ int main(void)
     menu_back();
     menu_key(1);
     menu_key(1);
+    menu_key(1);
     menu_key(0); // Device
     menu_key(0);
     menu_key(-1); // Volume +5 saved before returning
     menu_back();
     assert(!strcmp(title, "DEVICE") && prefs.volume == 75);
     menu_back();
+    menu_key(1);
     menu_key(1);
     menu_key(1);
     menu_key(1);

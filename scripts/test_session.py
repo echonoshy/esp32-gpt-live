@@ -36,6 +36,8 @@ def codex():
             result = {"account": {"type": "chatgpt", "planType": "test"}}
         elif method == "thread/start":
             result = {"thread": {"id": str(uuid.uuid4())}}
+        elif method == "thread/realtime/appendText":
+            log("interrupt", thread=params["threadId"])
         elif method == "thread/realtime/start":
             log("session", thread=params["threadId"], voice=params["voice"], prompt=params["prompt"])
             time.sleep(0.4)  # Buffer microphone input through startup.
@@ -61,10 +63,14 @@ async def worker():
                 if ready:
                     voiced = frames >= 8 and played < 12 and time.monotonic() - input_at > 0.35
                     if voiced:
+                        if played == 0:
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"assistant","text":"reply"}))
                         played += 1
                     if voiced:
                         log("output", worker=ident, sample=1500 + played)
                     await ws.send(struct.pack("<h", 1500 + played if voiced else 0) * 480)
+                    if voiced and played == 12:
+                        await ws.send(json.dumps({"type":"transcript","role":"assistant","text":"reply"}))
         task = asyncio.create_task(tick())
         try:
             async for m in ws:
@@ -74,9 +80,9 @@ async def worker():
                         frames += 1
                         if frames == 1:
                             input_at = time.monotonic()
-                            await ws.send(json.dumps({"type": "user_started"}))
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"user","text":"hello"}))
                         elif frames == 16:
-                            await ws.send(json.dumps({"type": "user_started"}))
+                            await ws.send(json.dumps({"type":"transcript","role":"user","text":"hello"}))
                 else:
                     e = json.loads(m)
                     if e["type"] == "answer":
@@ -86,6 +92,9 @@ async def worker():
                         enabled = e["enabled"]
                         log("input", enabled=enabled, worker=ident)
                         if e.get("clear"):
+                            if frames:
+                                for role in ("user","assistant"):
+                                    await ws.send(json.dumps({"type":"transcript","role":role,"text":"old tail"}))
                             frames = 0
                             played = 0
         finally:
@@ -153,18 +162,35 @@ async def check():
                 await send("stop")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
                 messages.clear()
-                await send("start", protocol=3, mode="continuous", duplex=1, voice="cove")
+                await send("start", protocol=3, mode="continuous", duplex=0, voice="cove")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "listen" for m in messages))
                 sessions = events("session")
                 assert len(sessions) == 2 and sessions[0]["thread"] != sessions[1]["thread"]
+                count=len(events("audio"))
                 for _ in range(10):
                     await ws.send(struct.pack("<h", 1200) * 480)
+                await until(lambda:len(events("audio"))==count+10)
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "playback_begin" for m in messages))
                 count = len(events("audio"))
                 for _ in range(6):
                     await ws.send(struct.pack("<h", 1200) * 480)
                 await until(lambda: len(events("audio")) == count + 6)
-                await until(lambda: any(isinstance(m, dict) and m.get("type") == "clear" for m in messages))
+                await asyncio.sleep(0.25)
+                assert not any(isinstance(m,dict) and m.get("type")=="clear" for m in messages), "natural speech forced local interruption"
+                assert not events("interrupt"), "natural speech injected a stop instruction"
+                sessions_before_cancel=len(events("session"))
+                await send("cancel")
+                await until(lambda:any(isinstance(m,dict) and m.get("type")=="clear" for m in messages))
+                await asyncio.sleep(0.15)
+                messages.clear()
+                await asyncio.sleep(0.15)
+                assert not any(isinstance(m,bytes) for m in messages), "canceled audio escaped"
+                # A fresh user/assistant exchange resumes without an arbitrary quiet gate.
+                for _ in range(16):
+                    await ws.send(struct.pack("<h",1200)*480)
+                    await asyncio.sleep(0.02)
+                await until(lambda:any(isinstance(m,bytes) for m in messages))
+                assert len(events("session"))==sessions_before_cancel, "cancel discarded context"
                 await send("pause")
                 await asyncio.sleep(0.1)
                 count = len(events("audio"))
@@ -217,7 +243,18 @@ async def check():
                 end = next(m for m in messages if isinstance(m, dict) and m.get("type") == "playback_end")
                 await send("playback_drained", epoch=end["epoch"])
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "waiting" and m.get("epoch") == end["epoch"] for m in messages))
-                # One-key switching and live -> hold use the same upstream conversation.
+                # Explicit PTT cancel clears queued output, keeping the Codex thread.
+                await send("ptt_start")
+                for _ in range(16):
+                    await ws.send(struct.pack("<h",1200)*480)
+                    await asyncio.sleep(0.02)
+                await send("ptt_end")
+                await send("cancel")
+                await asyncio.sleep(0.15)
+                messages.clear()
+                await asyncio.sleep(0.5)
+                assert not any(isinstance(m,bytes) for m in messages), "PTT cancellation leaked output"
+                # Quick-menu switching and live -> hold use the same upstream conversation.
                 messages.clear()
                 await send("mode", mode="continuous")
                 await until(lambda: any(isinstance(m, dict) and m.get("mode") == "continuous" for m in messages))
@@ -300,7 +337,7 @@ async def check():
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
                 await ws.close()
                 await reader
-                print("PASS: startup capture and early release, release-only model input, tagged playback, voice/prompt, fresh conversation, full-duplex barge-in, menu pause/resume, idle stop acknowledgement")
+                print("PASS: startup capture and early release, release-only model input, tagged playback, voice/prompt, fresh conversation, continuous duplex without automatic stop prompts, explicit cancellation, menu pause/resume, idle stop acknowledgement")
                 print(f"PASS: streaming PTT input, held-output gate, all 12 reply frames preserved, buffered first audio {first_audio_ms} ms (offline only), mode switch preserves context, live-to-PTT startup queue")
                 print('PASS: compressed 244/248-byte wire with PCM media compatibility, silent transport probe creates no upstream session')
         finally:

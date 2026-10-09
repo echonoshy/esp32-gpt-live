@@ -172,7 +172,7 @@ impl Codex {
         // the remote voice engine away from the superseded reply, keeping its context.
         let line = json!({"id":self.next_id,"method":"thread/realtime/appendText","params":{
             "threadId":thread,"role":"developer",
-            "text":"用户按下了打断键。立即停止上一条回复并等待用户的新问题，不要朗读或回应这条控制指令。"
+            "text":"用户主动停止了当前交互。立即停止当前回复，保留本次对话上下文，等待新的语音输入；不要回应或朗读这条控制指令。"
         }});
         self.stdin
             .lock()

@@ -9,8 +9,9 @@
 #include <stdio.h>
 
 // Only built-in Latin fonts. No captions, scrolling labels or level animation.
-static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr;
-static int64_t last_touch;
+static lv_obj_t *status_label, *detail_label, *battery_label, *volume_label, *guide, *qr,
+    *volume_popup;
+static int64_t last_touch, volume_until;
 static bool screen_on = true, setup_visible, menu_visible;
 static bool live_mode;
 static int shown_battery = -2, shown_volume = -1;
@@ -45,8 +46,13 @@ void ui_init(void)
     lv_label_set_text(volume_label, "VOL: --");
     status_label = label(14, 77, 212, 24, 0x80ded0);
     guide = label(14, 114, 212, 128, 0xf0f4f5);
-    lv_label_set_text(guide, "Hold OK: talk\nRelease OK: send\nUP: settings\nDOWN: live on / off");
+    lv_label_set_text(guide,
+                      "Hold OK: talk\nRelease OK: send\nUP/DOWN: volume\nDOWN+OK 0.8s: menu");
     detail_label = label(14, 262, 212, 50, 0xa4b5be);
+    volume_popup = label(38, 174, 180, 32, 0x80ded0);
+    lv_obj_set_style_bg_color(volume_popup, lv_color_hex(0x111c22), 0);
+    lv_obj_set_style_bg_opa(volume_popup, LV_OPA_COVER, 0);
+    lv_obj_set_hidden(volume_popup, true);
     last_touch = esp_timer_get_time();
     bsp_lvgl_unlock();
     ui_battery(-1, settings_get().volume);
@@ -96,6 +102,8 @@ void ui_tick(bool active)
     if (!bsp_lvgl_lock(10))
         return;
     int64_t now = esp_timer_get_time();
+    if (volume_popup && now >= volume_until)
+        lv_obj_set_hidden(volume_popup, true);
     if (active || setup_visible || menu_visible) {
         last_touch = now;
         if (!screen_on) {
@@ -113,6 +121,7 @@ static void show_qr(const char *title, const char *payload, const char *instruct
     ui_wake();
     if (!bsp_lvgl_lock(100))
         return;
+    lv_obj_set_hidden(volume_popup, true);
     setup_visible = setup;
     lv_obj_set_hidden(guide, true);
     lv_label_set_text(status_label, title);
@@ -158,10 +167,10 @@ void ui_show_guide(void)
     setup_visible = false;
     menu_visible = false;
     lv_obj_set_size(guide, 212, 128);
-    lv_label_set_text(guide, live_mode ? "Hold OK: talk (PTT)\nRelease OK: send\nUP: "
-                                         "settings\nDOWN: stop live\n\nSpeak after LISTENING"
-                                       : "Hold OK: talk\nRelease OK: send\nUP: settings\nDOWN: "
-                                         "start live\n\nTap OK: no action");
+    lv_label_set_text(guide, live_mode ? "LIVE: speak freely\nTap OK: stop reply\nHold OK: switch "
+                                         "to PTT\nUP/DOWN: volume\nDOWN+OK 0.8s: menu"
+                                       : "Hold OK: talk\nRelease OK: send\nTap OK: stop "
+                                         "reply\nUP/DOWN: volume\nDOWN+OK 0.8s: menu");
     lv_obj_set_hidden(guide, false);
     bsp_lvgl_unlock();
 }
@@ -180,6 +189,7 @@ void ui_show_menu(const char *title, const char *const *items, int count, int se
         lv_obj_delete(qr);
         qr = NULL;
     }
+    lv_obj_set_hidden(volume_popup, true);
     menu_visible = true;
     setup_visible = false;
     lv_obj_set_hidden(guide, false);
@@ -194,5 +204,16 @@ void ui_show_menu(const char *title, const char *const *items, int count, int se
     lv_label_set_text(status_label, title);
     lv_label_set_text(guide, text);
     lv_label_set_text(detail_label, hint);
+    bsp_lvgl_unlock();
+}
+
+void ui_volume(int volume)
+{
+    if (!bsp_lvgl_lock(100))
+        return;
+    volume_until = esp_timer_get_time() + 1500000;
+    lv_label_set_text_fmt(volume_popup, "  Volume: %d", volume);
+    lv_obj_set_hidden(volume_popup, false);
+    lv_obj_move_foreground(volume_popup);
     bsp_lvgl_unlock();
 }

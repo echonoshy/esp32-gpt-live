@@ -134,7 +134,7 @@ static esp_err_t save(httpd_req_t *r)
         return error(r, e == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error",
                      "保存失败，请检查设置后重试");
     device_apply_settings();
-    return error(r, "200 OK", "设置已保存；音色、说话风格、全双工和超时将在新对话生效");
+    return error(r, "200 OK", "设置已保存；音色、说话风格和超时将在新对话生效");
 }
 static esp_err_t netcheck(httpd_req_t *r)
 {

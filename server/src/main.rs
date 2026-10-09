@@ -1,6 +1,7 @@
 mod adpcm;
 mod codex;
 mod conversation;
+mod live;
 mod preferences;
 mod ptt;
 mod reply_buffer;
@@ -130,7 +131,7 @@ async fn main() -> Result<()> {
 
 async fn health(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":5,"version":env!("CARGO_PKG_VERSION")}),
+        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":6,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 
@@ -230,7 +231,7 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                                 }
                             } else {let _=send(&out,status("idle"));}
                             let _=send(&out,text(json!({"type":"stopped"})));
-                        } else if matches!(kind,"ptt_start"|"ptt_end"|"interrupt"|"playback_drained"|"pause"|"resume"|"mode") {
+                        } else if matches!(kind,"ptt_start"|"ptt_end"|"cancel"|"interrupt"|"playback_drained"|"pause"|"resume"|"mode") {
                             if let Some((tx,_))=&session {if send(tx,Message::Text(s)).is_err(){break}}
                         } else if kind!="hello" {break}
                     }
@@ -430,7 +431,10 @@ async fn run_session(
         let mut continuous=prefs.continuous;
         let fast=prefs.fast_ptt;
         let tagged=prefs.tagged;
-        let mut duplex=continuous && prefs.duplex;
+        let mut live=live::Live::default();
+        let mut live_playing=false;
+        let mut live_active=false;
+        let mut live_waiting=false;
         let mut ready=false;
         let mut ptt=PushToTalk::new(fast);
         let mut replies=ReplyBuffer::default();
@@ -450,7 +454,6 @@ async fn run_session(
         let mut last_voice=tokio::time::Instant::now()-Duration::from_secs(1);
         let started=tokio::time::Instant::now();
         let mut last_activity=started;
-        let mut interrupt_hint_sent=false;
         let mut user_energy_frames=0u32;
         let mut tick=tokio::time::interval(Duration::from_millis(50));
         loop {
@@ -462,17 +465,21 @@ async fn run_session(
                             let event:Value=serde_json::from_str(&s)?;
                             match event["type"].as_str() {
                                 Some("stop")=>break,
-                                Some("interrupt") if continuous && ready=>{
+                                Some("cancel"|"interrupt")=>{
+                                    // Explicit user action only: keep the same Codex thread.
                                     let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
-                                    user_energy_frames=0;interrupt_hint_sent=false;
-                                    last_activity=tokio::time::Instant::now();
+                                    ptt.cancel();replies.clear();replay_tail=None;response_armed=false;
+                                    live.cancel();live_playing=false;live_active=false;live_waiting=false;
                                     send(&output,text(json!({"type":"clear","epoch":epoch})))?;
-                                    send(&worker.tx,text(json!({"type":"input","enabled":true,"clear":true})))?;
+                                    send(&worker.tx,text(json!({"type":"input","enabled":continuous && !paused,"clear":true})))?;
+                                    send(&output,text(json!({"type":if continuous {"activity"}else{"waiting"},"epoch":epoch,"active":false})))?;
                                     rpc.interrupt().await?;
+                                    last_activity=tokio::time::Instant::now();
                                 },
                                 Some("mode") if fast=>{
                                     last_activity=tokio::time::Instant::now();
-                                    continuous=event["mode"]=="continuous";duplex=continuous && prefs.duplex;
+                                    continuous=event["mode"]=="continuous";
+                                    live.cancel();live_playing=false;live_active=false;live_waiting=false;
                                     ptt.cancel();replies.clear();replay_tail=None;response_armed=false;paused=false;
                                     let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
                                     send(&worker.tx,text(json!({"type":"input","enabled":continuous,"clear":true})))?;
@@ -483,7 +490,9 @@ async fn run_session(
                                 },
                                 Some("playback_drained") if tagged=>{
                                     if let Some(epoch)=event["epoch"].as_u64() {
-                                        if fast && !continuous {
+                                        if continuous {
+                                            // Live playback never controls microphone admission.
+                                        } else if fast {
                                             if u32::try_from(epoch).ok().is_some_and(|e|replies.drained(e)) && replies.is_empty() && !ptt.capturing {
                                                 flow.drained(epoch as u32);
                                                 send(&output,text(json!({"type":"waiting","epoch":flow.epoch})))?;
@@ -500,11 +509,11 @@ async fn run_session(
                                 },
                                 Some("resume")=>{
                                     paused=false;last_activity=tokio::time::Instant::now();
-                                    send(&worker.tx,text(json!({"type":"input","enabled":continuous && (duplex || flow.listening()),"clear":true})))?;
+                                    send(&worker.tx,text(json!({"type":"input","enabled":continuous,"clear":true})))?;
                                 },
                                 Some("ptt_start") if !continuous || fast=>{
                                     let interrupt_old = response_armed || continuous;
-                                    continuous=false;duplex=false;paused=false;
+                                    continuous=false;paused=false;live_playing=false;live_active=false;live_waiting=false;
                                     ptt.start();replies.clear();replay_tail=None;released=None;first_output=true;first_model_audio=true;
                                     ptt_started=Some(tokio::time::Instant::now());input_quiet_frames=0;
                                     replay_tick.reset();
@@ -537,11 +546,11 @@ async fn run_session(
                             if ptt.overflow { bail!("PTT recording exceeded 60 seconds"); }
                             last_activity=tokio::time::Instant::now();
                         },
-                        Message::Binary(bytes) if ready && continuous && !paused && (duplex || flow.listening())=>{
+                        Message::Binary(bytes) if ready && continuous && !paused=>{
                             // Silence clocks the transport but never extends the idle timer.
                             if rms_above(&bytes,600) {
                                 user_energy_frames+=1;
-                                if user_energy_frames>=4 {flow.user_turn();last_activity=tokio::time::Instant::now();}
+                                if user_energy_frames>=4 {last_activity=tokio::time::Instant::now();}
                             } else {user_energy_frames=0;}
                             send(&worker.tx,Message::Binary(bytes))?;
                         },
@@ -563,6 +572,28 @@ async fn run_session(
                         Message::Binary(bytes) if ready=>{
                             if !valid_pcm(&bytes){bail!("invalid media frame")}
                             let voiced=bytes.chunks_exact(2).any(|s|i16::from_le_bytes([s[0],s[1]]).unsigned_abs()>30);
+                            if continuous {
+                                // Forward the full media clock, including silence. Natural user speech
+                                // never cancels playback locally or injects a stop instruction.
+                                if paused || !live.allowed() {continue;}
+                                if !live_playing {
+                                    live_playing=true;
+                                    send(&output,text(json!({"type":"playback_begin","epoch":flow.epoch})))?;
+                                }
+                                if voiced {
+                                    live_waiting=false;
+                                    last_voice=tokio::time::Instant::now();last_activity=last_voice;
+                                    if !live_active {
+                                        live_active=true;
+                                        send(&output,text(json!({"type":"activity","active":true})))?;
+                                    }
+                                }
+                                if tagged {
+                                    let mut frame=flow.epoch.to_le_bytes().to_vec();frame.extend_from_slice(&bytes);
+                                    send(&output,Message::Binary(frame.into()))?;
+                                } else {send(&output,Message::Binary(bytes))?;}
+                                continue;
+                            }
                             if tagged {
                                 // Consume silence during capture to establish an interruption boundary.
                                 if !continuous && (!response_armed || (!fast && ptt.capturing)) {
@@ -571,7 +602,6 @@ async fn run_session(
                                 }
                                 let action=flow.audio(started.elapsed().as_millis() as u64,voiced);
                                 if let AudioAction::Begin(epoch)=action {
-                                    if continuous && !duplex { send(&worker.tx,text(json!({"type":"input","enabled":false,"clear":true})))?; }
                                     if !fast || continuous {send(&output,text(json!({"type":"playback_begin","epoch":epoch})))?;}
                                 }
                                 if let AudioAction::Begin(epoch)|AudioAction::Frame(epoch)=action {
@@ -605,20 +635,30 @@ async fn run_session(
                                     tracing::info!(continuous, open_ms=opening.elapsed().as_millis() as u64,"voice media ready");
                                 },
                                 Some("error")=>bail!("media worker failed"),
-                                Some("user_started")=>{
-                                    if !continuous && (!response_armed || (!fast && ptt.capturing)) {continue;}
-                                    if duplex && !paused && matches!(flow.phase, conversation::Phase::Playing | conversation::Phase::Draining) {
-                                        let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
-                                        send(&output,text(json!({"type":"clear","epoch":epoch})))?;
-                                        rpc.interrupt().await?;
-                                    }
-                                    flow.user_turn();last_activity=tokio::time::Instant::now();
+                                Some("media_stats")=>{
+                                    tracing::debug!(input_queue_ms=value["input_queue_ms"].as_u64(),
+                                        input_dropped_samples=value["input_dropped_samples"].as_u64(),
+                                        output_ws_bytes=value["output_ws_bytes"].as_u64(),"media queue");
                                 },
-                                Some("transcript")=>{
-                                    if value["role"]=="user" && (continuous || (response_armed && (fast || !ptt.capturing))) {
+                                Some("user_started") if !continuous=>{
+                                    flow.user_turn();
+                                },
+                                Some("transcript_delta"|"transcript")=>{
+                                    let role=value["role"].as_str().unwrap_or("");
+                                    let has_text=value["text"].as_str().is_some_and(|s|!s.trim().is_empty());
+                                    let done=value["type"]=="transcript";
+                                    if continuous {
+                                        live.transcript(role,done,has_text);
+                                        if has_text {last_activity=tokio::time::Instant::now();}
+                                        if role=="user" && has_text && !live.awaiting_input() {live_waiting=true;}
+                                        if role=="user" && has_text && !live.awaiting_input() && !live_active {
+                                            live_active=true;last_voice=tokio::time::Instant::now();
+                                            send(&output,text(json!({"type":"activity","active":true})))?;
+                                        }
+                                    } else if role=="user" && (response_armed && (fast || !ptt.capturing)) {
                                         flow.user_turn();last_activity=tokio::time::Instant::now();
                                     }
-                                    if !tagged {if let Some(message)=caption(&value) {send(&output,message)?;}}
+                                    if !tagged && done {if let Some(message)=caption(&value) {send(&output,message)?;}}
                                 },
                                 _=>{}
                             }
@@ -668,15 +708,15 @@ async fn run_session(
                         replay_tail=None;
                         send(&worker.tx,text(json!({"type":"input","enabled":false,"clear":false})))?;
                     }
-                    if tagged {
+                    if tagged && !continuous {
                         if let Some(epoch)=flow.end_due(now) {
                             if fast && !continuous {replies.ended(epoch);} else {send(&output,text(json!({"type":"playback_end","epoch":epoch})))?;}
                         }
-                        if flow.interrupt_stalled(now) && !interrupt_hint_sent {
-                            // Input remains enabled while waiting for a fresh user turn.
-                            send(&output,text(json!({"type":"hint","message":"请直接说话，或按下键结束"})))?;
-                            interrupt_hint_sent=true;
-                        }
+                    }
+                    // Display-only activity: no audio frame or capture gate depends on this timer.
+                    if continuous && live_active && !live_waiting && last_voice.elapsed()>Duration::from_millis(650) {
+                        live_active=false;
+                        send(&output,text(json!({"type":"activity","active":false})))?;
                     }
                     if last_activity.elapsed()>Duration::from_secs(prefs.idle_seconds) || started.elapsed()>Duration::from_secs(1800){
                         send(&output,text(json!({"type":"ended","reason":if started.elapsed()>Duration::from_secs(1800){"limit"}else{"idle"}})))?;

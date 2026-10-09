@@ -12,6 +12,7 @@ ws.onopen = async () => {
     await ctx.audioWorklet.addModule('/worklet.js');
     await ctx.resume();
     input = new AudioWorkletNode(ctx,'pcm-input');
+    input.port.onmessage=({data})=>report({type:'media_stats',...data,output_ws_bytes:ws.bufferedAmount});
     const destination = ctx.createMediaStreamDestination();
     input.connect(destination);
     // Keep the source clock running even when no device audio arrives.
@@ -37,8 +38,11 @@ ws.onopen = async () => {
     channel.onmessage=({data})=>{
       try {
         const event=JSON.parse(data);
-        if(event.type==='turn.started' && event.turn?.role==='user')report({type:'user_started'});
-        if (event.type==='turn.done' && event.turn?.transcript) report({type:'transcript',role:event.turn.role,text:event.turn.transcript});
+        // This v3 subscription channel is not the public Realtime event schema.
+        if(event.type==='input_transcript.added' || event.type==='output_transcript.added')
+          report({type:'transcript_delta',role:event.type==='input_transcript.added'?'user':'assistant',text:event.item?.text||''});
+        if(event.type==='error') fail('upstream voice error');
+        if (event.type==='turn.done' && typeof event.turn?.transcript==='string') report({type:'transcript',role:event.turn.role,text:event.turn.transcript});
       } catch(error){fail(error);}
     };
     await pc.setLocalDescription(await pc.createOffer());

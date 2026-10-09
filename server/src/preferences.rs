@@ -10,7 +10,6 @@ pub struct Preferences {
     pub continuous: bool,
     pub fast_ptt: bool,
     pub tagged: bool,
-    pub duplex: bool,
     pub idle_seconds: u64,
     pub voice: String,
     pub pace: usize,
@@ -40,7 +39,6 @@ impl Preferences {
             continuous,
             fast_ptt: v["protocol"].as_u64().unwrap_or(1) >= 4,
             tagged: v["protocol"].as_u64().unwrap_or(1) >= 2,
-            duplex: index("duplex", 1)? == 1,
             idle_seconds: v["idle_seconds"].as_u64().unwrap_or(180).clamp(30, 900),
             voice: voice.into(),
             pace: index("pace", 2)?,
@@ -67,10 +65,11 @@ mod tests {
         assert!(Preferences::parse(&json!({"voice":"marin"})).is_err());
         assert!(Preferences::parse(&json!({"pace":-1})).is_err());
         assert!(Preferences::parse(&json!({"language":3})).is_err());
+        // Legacy duplex=0 cannot silently disable live input in the new gateway.
         assert!(
-            Preferences::parse(&json!({"mode":"continuous","duplex":1}))
+            Preferences::parse(&json!({"mode":"continuous","duplex":0}))
                 .unwrap()
-                .duplex
+                .continuous
         );
     }
 }

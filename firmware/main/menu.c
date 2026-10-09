@@ -22,6 +22,7 @@ typedef enum {
 } page_t;
 static page_t page;
 static int selected;
+static bool live_mode;
 static const char *const pace[] = {"Normal", "Slow", "Fast"};
 static const char *const length[] = {"Short", "One sentence", "Detailed"};
 static const char *const language[] = {"Chinese", "English", "Follow user"};
@@ -31,6 +32,7 @@ static int count(void)
 {
     switch (page) {
     case ROOT:
+        return 6;
     case VOICE:
     case DEVICE:
     case CHAT:
@@ -61,20 +63,22 @@ void menu_refresh(void)
     char rows[10][42] = {{0}}, title[32] = "SETTINGS", hint[96] = "UP/DOWN: move  OK: select";
     switch (page) {
     case ROOT:
-        snprintf(rows[0], 42, "Conversation");
-        snprintf(rows[1], 42, "Voice");
-        snprintf(rows[2], 42, "Device");
-        snprintf(rows[3], 42, "Network");
-        snprintf(rows[4], 42, "Back to chat");
+        snprintf(title, 32, "QUICK MENU");
+        snprintf(rows[0], 42, "%s live chat", live_mode ? "Exit" : "Start");
+        snprintf(rows[1], 42, "Conversation");
+        snprintf(rows[2], 42, "Voice");
+        snprintf(rows[3], 42, "Device");
+        snprintf(rows[4], 42, "Network");
+        snprintf(rows[5], 42, "Back to chat");
         break;
     case CHAT:
         snprintf(title, 32, "CONVERSATION");
         snprintf(rows[0], 42, "New chat (clear context)");
         snprintf(rows[1], 42, "End chat");
-        snprintf(rows[2], 42, "Live duplex: %s", p.duplex ? "Full" : "Half");
+        snprintf(rows[2], 42, "Live: always full duplex");
         snprintf(rows[3], 42, "Idle timeout: %d s", p.idle_seconds);
         snprintf(rows[4], 42, "Back");
-        snprintf(hint, 96, "Duplex: next new chat");
+        snprintf(hint, 96, "Context kept on mode switch");
         break;
     case VOICE:
         snprintf(title, 32, "VOICE");
@@ -150,8 +154,9 @@ void menu_refresh(void)
         items[i] = rows[i];
     ui_show_menu(title, items, count(), selected, hint);
 }
-void menu_open(void)
+void menu_open(bool live)
 {
+    live_mode = live;
     enter(ROOT);
     menu_refresh();
 }
@@ -220,9 +225,11 @@ menu_action_t menu_key(int key)
     else
         switch (page) {
         case ROOT:
-            if (selected == 4)
+            if (selected == 0)
+                return MENU_LIVE;
+            if (selected == 5)
                 return MENU_CLOSE;
-            enter((page_t[]){CHAT, VOICE, DEVICE, NETWORK}[selected]);
+            enter((page_t[]){CHAT, VOICE, DEVICE, NETWORK}[selected - 1]);
             break;
         case CHAT:
             if (selected == 0)
@@ -230,8 +237,7 @@ menu_action_t menu_key(int key)
             else if (selected == 1)
                 return MENU_STOP;
             else if (selected == 2) {
-                p.duplex = !p.duplex;
-                changed = true;
+                // Informational: live capture is never gated by playback.
             } else if (selected == 3)
                 enter(EDIT_IDLE);
             else

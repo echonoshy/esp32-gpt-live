@@ -1,4 +1,4 @@
-# 语音协议 v4 与多级设置
+# 语音协议 v6 与多级设置
 
 ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留畅聊；不引入唤醒词、长期记忆和文件管理。
 
@@ -7,10 +7,10 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 设备发送：
 
 ```json
-{"type":"start","protocol":4,"mode":"ptt","voice":"cove","pace":0,"reply_length":0,"language":0,"duplex":0,"idle_seconds":180}
+{"type":"start","protocol":6,"mode":"ptt","voice":"cove","pace":0,"reply_length":0,"language":0,"duplex":1,"idle_seconds":180}
 ```
 
-- `mode`：`ptt` 或 `continuous`；`duplex:1` 只在畅聊生效。
+- `mode`：`ptt` 或 `continuous`；畅聊始终全双工。`duplex` 仅保留旧字段兼容，不再关闭畅聊输入。
 - `voice`：cove、juniper、maple、spruce、ember、vale、breeze、arbor、sol。
 - `pace`：0 自然，1 慢，2 快；`reply_length`：0 简短，1 一句话，2 详细；`language`：0 普通话，1 英语，2 跟随用户。
 - 音色是 Codex 原生参数，其他风格选项为模型指令。参数在会话启动时读取，下一次新对话应用改变。
@@ -18,11 +18,11 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 
 当前订阅桥使用 Codex CLI 0.159.2。`thread/realtime/listVoices` 返回 v1/v2 两组；该版本 `core/src/realtime_conversation.rs` 的 `validate_realtime_voice` 将 **V3 映射到 V1**，不能把公开 API 的音色直接填入。来源：[对应版本实现](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/realtime_conversation.rs)。
 
-上行每帧 960 bytes（24 kHz、s16le、mono、20 ms）；协议 v2/v3/v4 下行前加 `u32 little-endian epoch`，共 964 bytes。过期音频丢弃。旧协议 1 的 PTT 脚本继续接收未加代号的 960 字节音频和转写。协议 1/3 继续兼容原先松手后才重放输入的行为。
+协议 v5/v6 上行每帧 244 bytes ADPCM，下行前置 `u32 little-endian epoch`，共 248 bytes；媒体桥内部继续使用 960 bytes PCM（24 kHz、s16le、mono、20 ms）。旧协议 v2/v3/v4 为 960/964 bytes PCM。过期音频丢弃。旧协议 1 的 PTT 脚本继续接收未加代号的 960 字节音频和转写。协议 1/3 继续兼容原先松手后才重放输入的行为。
 
 ## 按住说话
 
-1. OK 按下立即进入本地预录，约 200 ms 确认有效按住；短碰只取消本地预录，不打开设置，不新建会话。16 帧／320 ms 缓冲保留首音节。首次有效按住发送 start，再发 ptt_start，按序发送开头缓存和后续录音；接通期间也可以上传。
+1. OK 按下立即进入本地预录，约 200 ms 确认有效按住；短按取消本地预录，若正在思考或播放则发送 cancel；空闲只唤亮屏幕，不新建会话。16 帧／320 ms 缓冲保留首音节。首次有效按住发送 start，再发 ptt_start，按序发送开头缓存和后续录音；接通期间也可以上传。
 2. 服务器入口最多 3008 条消息，覆盖启动期间按下键再转 PTT 的情况。媒体就绪后，`PushToTalk` 按 20 ms 时钟持续向 AudioWorklet 送入录音，不等松手。丢失时钟不累加逐帧延迟。
 3. 模型在按住期间提前产生的音频进入服务器 `ReplyBuffer`，设备此时不收到播放帧。若输入静音后再次说话，丢弃尚未播出的早期回复并引导模型停止旧回答。
 4. 松开发 ptt_end，停止上行；未发送的少量输入继续排空，再留 600 ms 给 worklet 尾部。`submitted` 仅表示已松手。缓存回复按 20 ms 时钟输出，保留开头；不同播放代号之间等待设备排空确认，避免队列溢出或尾音丢失。PTT 结束后麦克风保持关闭。
@@ -32,31 +32,32 @@ ESP32-C3 保持 ESP-IDF C，业务服务为 Rust。默认按住说话，保留�
 
 日志仅记录耗时／数量：媒体建立耗时、松手时输入与回复积压、首个模型音频、首个下发音频，以及设备的 `release_to_speaker_ms`。不会记录录音或转写。服务器下发时间不含设备 240 ms 起播缓冲。
 
-## 畅聊与播放排空
+## 持续双向畅聊
 
-1. status:ready 后发 listen，打开输入。
-2. 第一个模型非静音帧发 playback_begin，更新代号；半双工关闭输入，全双工保持输入。
-3. 连续 650 ms 无非静音输出发 playback_end。设备队列 32 × 20 ms、预填充 12 帧，短回复等待上限 350 ms。
-4. 队列及 I2S DMA 排空后再等保护时间，设备发 playback_drained。服务仅接受当前代号，半双工恢复输入。PTT 此时仍等待按键，不自动开麦。
-5. 句中长停顿之后如有新输出，会更新代号并丢弃旧排空确认。
+1. status:ready 后发 listen，打开输入。麦克风和扬声器独立，不因对方说话切换收音权限。
+2. 持续转发模型音轨，含静音；一次播放流只建立一个 epoch。不使用静音、字幕结束或 playback_drained 决定何时接受用户输入。
+3. 用户增量转写仅更新内部会话状态，不自动清理音频，也不向模型追加停止指令。自然插话由 GPT-Live 根据连续音轨处理。
+4. 输出能量和 650 ms 计时仅用于屏幕活动状态，不控制畅聊输入或输出。用户已说话且模型尚未回复时保留交互活动状态，短按 OK 仍可停止。
+5. 进入菜单发送 pause，暂停输入和新增下行；已进入设备队列的短段可能播完。返回 resume。既有 WebRTC 和 Codex thread 保持，模型输入端的音频时钟仍输出静音。
+6. 设备继续使用固定 32 帧容量与 12 帧预缓冲；畅聊积压超过 24 帧时丢弃最旧部分至 12 帧，避免网络恢复后播放越来越迟。诊断记录丢帧和入队到播放的最大年龄；不是网络端到端延迟。
 
-进入设置发送 pause，畅聊暂停输入，正在播放的回复可以播完。返回发送 resume，根据播放状态恢复。全双工为实验项：同时收音和播放；收到新用户 turn.started 时清旧输出并引导停止旧回复。没有增加 AEC；靠回声小的使用环境降低误触发概率，不能把此选项视为已验证的消回声算法。
+## 主动停止与模式切换
 
-## 打断与新对话
+短按停止发送 `cancel`。服务器清空 PTT 输入/回复缓存、递增播放 epoch，设备清旧队列；不关闭 Codex thread。PTT 等下一次按住；畅聊持续收音，但抑制旧输出，等新的用户输入及相应助手增量转写恢复。旧助手的最后一条完成事件不能单独恢复声音。主动停止向上游发送固定的应用控制指令；其完成不等同于音频已停止或上下文精确截断。
 
-`{"type":"mode","mode":"continuous"}` 开启畅聊，`mode:ptt` 回到按住说话；两者清除旧播放并切换输入，不新建 Codex thread。畅聊中 ptt_start 同样转入 PTT。模式变化与新对话是不同操作，音色／全双工等会话参数仍在下一次新对话应用。
+`mode:continuous` 和 `mode:ptt` 在同一 thread 内切换。畅聊里有效按住 OK 同样切回 PTT。切模式清理旧播放，下一次明确的新输入恢复输出。音色与说话风格仍在下一次新对话应用。
 
-打断立即清空本地音频，并用 `thread/realtime/appendText`、role:developer 发送固定的应用控制指令。上游停止依赖模型遵循指令；本地静音、代号过滤是确定的。旧输出至少出现 200 ms 静音边界且有新的用户话音后才允许新输出，避免旧回答再次响起。
+旧的 200 ms 静音隔离及 playback_drained 轮次控制只用于兼容 PTT 输出，不再参与畅聊。客户端消耗 v3 的 input_transcript.added、output_transcript.added 和 turn.done，空转写完成事件也要结算归属；转写不显示、不存盘。
 
 新对话先 stop，等待服务发 **stopped** 后再 start。stopped 在旧任务终止后发出，即使旧任务已经自然结束/不存在也会回复，避免用户在待机新建时无限等待。创建全新临时 Codex thread、浏览器和 WebRTC；不注入旧转写/history。配置切换不伪装成清空屏幕。
 
 ## 按键与菜单
 
-- 聊天页：UP 打开设置，DOWN 开启／关闭畅聊；按住 OK 转为 PTT，松开提交，短碰无操作。屏幕唤醒和该次按键操作一起执行，不启用双键。
-- 菜单：UP/DOWN 移动或调整，短按 OK 选择，长按 OK 返回上级、顶层退出。按下时绑定页面，长按返回后松手不会变成录音或选择。
-- 菜单：Conversation / Voice / Device / Network，每层保留 Back，音色长名单按选择分页显示。音量放在 Device → Volume。
-- Wi-Fi 配网：扫码加入热点、扫码网页；短按 OK 翻页，长按 OK 重试旧网络。
-- 电源为独立硬件键，公开 BSP 仅有 GPIO0 上的三功能键，没有软件电源短按事件。
+- 聊天页：OK 按住／松开说话，短按停止；上／下键调音量。长按 500 ms 后每 150 ms 调整 5，松手保存一次。
+- 下键 + OK：从起始 80 ms 窗口形成组合并持续 800 ms 打开快捷菜单。提前释放不触发录音、停止或音量；后加入的键不转换已开始的手势。打开后须全部松开，防止残留 OK 选中首项。
+- 菜单首项 Start/Exit live chat；其后 Conversation / Voice / Device / Network / Back to chat。上下移动，短按 OK 确认，长按 OK 返回，按下时绑定界面。
+- ADC 每 10 ms 采样，3 次稳定后提交状态。独立组合键电压窗口见 BSP，非 GPIO 多键扫描；读数和当前键掩码可从诊断查看，实际电压窗口尚待用户按键确认。
+- 电源键由硬件处理。
 
 ## 检查边界
 

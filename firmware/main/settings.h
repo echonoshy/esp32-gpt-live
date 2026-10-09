@@ -9,3 +9,6 @@ void settings_init(void);
 settings_t settings_get(void);
 esp_err_t settings_save(settings_t value);
 const char *settings_voice(int index);
+
+// Apply while held; persist once when the volume gesture ends.
+void settings_adjust_volume(int delta);

@@ -41,7 +41,7 @@
 #define PTT_HOLD_MS 200
 #define PREROLL_FRAMES 16
 typedef struct {
-    uint32_t epoch;
+    uint32_t epoch, received_at;
     int16_t samples[SAMPLES];
 } audio_frame_t;
 typedef enum {
@@ -61,7 +61,11 @@ typedef enum {
     CMD_PTT_END,
     CMD_NEW_START,
     CMD_NETCHECK,
-    CMD_NETCHECK_DONE
+    CMD_NETCHECK_DONE,
+    CMD_CANCEL,
+    CMD_CANCEL_CAPTURE,
+    CMD_VOLUME_SAVE,
+    CMD_LIVE
 } command_type_t;
 typedef struct {
     command_type_t type;
@@ -77,15 +81,14 @@ static atomic_bool connected, ready, recording, starting, wanted, awaiting_clear
 static atomic_bool boot_complete;
 static atomic_bool settings_open;
 static bool menu_notice;
-static atomic_bool capture_pending, accept_requested;
+static atomic_bool capture_pending, accept_requested, interaction_active;
 static atomic_uint released_at;
 static atomic_bool output_timing_pending;
 static uint8_t preroll[PREROLL_FRAMES][ADPCM_BYTES];
 static adpcm_state_t input_codec;
 static unsigned preroll_count;   // Protected by send_lock.
 static unsigned captured_frames; // Protected by send_lock; includes the pre-roll.
-static atomic_bool menu_active, live_mode, full_duplex, session_full_duplex, ptt_held,
-    restart_pending, can_listen;
+static atomic_bool menu_active, live_mode, full_duplex, ptt_held, restart_pending, can_listen;
 static atomic_uint capture_started;
 static atomic_uint epoch, mic_frames, speaker_frames, dropped_frames, playback_refills;
 static atomic_int battery = -1, attempts;
@@ -93,7 +96,7 @@ static atomic_uint listen_after, retry_at, started_at, ready_at, last_output_at;
 static atomic_bool netcheck;
 static atomic_uint alloc_failures, alloc_failed_size, send_max_ms, send_slow, send_errors;
 static atomic_uint mic_read_max_ms, mic_read_errors, receive_gap_max_ms, receive_last_ms;
-static atomic_uint netcheck_runs;
+static atomic_uint netcheck_runs, playback_age_max_ms;
 static atomic_uint wifi_disconnects, wifi_last_reason;
 static void wifi_diagnostic(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -191,7 +194,13 @@ void device_add_diagnostics(cJSON *root)
     cJSON_AddNumberToObject(j, "speaker_frames", atomic_load(&speaker_frames));
     cJSON_AddNumberToObject(j, "dropped_frames", atomic_load(&dropped_frames));
     cJSON_AddNumberToObject(j, "playback_refills", atomic_load(&playback_refills));
+    cJSON_AddNumberToObject(j, "playback_age_max_ms", atomic_load(&playback_age_max_ms));
     cJSON_AddNumberToObject(j, "playback_queued", uxQueueMessagesWaiting(playback));
+    cJSON_AddNumberToObject(j, "button_mv", bsp_button_read_mv());
+    cJSON_AddNumberToObject(j, "button_keys", bsp_button_read_keys());
+    cJSON_AddBoolToObject(j, "live", atomic_load(&live_mode));
+    cJSON_AddBoolToObject(j, "microphone_active", atomic_load(&recording));
+    cJSON_AddBoolToObject(j, "interaction_active", atomic_load(&interaction_active));
     cJSON_AddBoolToObject(j, "netcheck", atomic_load(&netcheck));
     cJSON_AddNumberToObject(j, "netcheck_runs", atomic_load(&netcheck_runs));
     cJSON_AddNumberToObject(j, "wifi_disconnects", atomic_load(&wifi_disconnects));
@@ -254,7 +263,7 @@ static void retry(void)
     if (count > 3) {
         atomic_store(&wanted, false);
         atomic_store(&sticky_error, true);
-        ui_set("CONNECTION LOST", "Hold OK to retry\nUP: network settings");
+        ui_set("CONNECTION LOST", "Hold OK to retry\nDOWN+OK: menu");
     } else {
         atomic_store(&retry_at, now_ms() + (2000 << (count - 1)));
         ui_set("RECONNECTING", "Please wait...");
@@ -316,7 +325,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
                 atomic_load(&awaiting_clear))
                 return;
-            audio_frame_t decoded = {.epoch = e};
+            audio_frame_t decoded = {.epoch = e, .received_at = now};
             if (!adpcm_decode((const uint8_t *)payload + 4, ADPCM_BYTES, decoded.samples))
                 return;
             if (xQueueSend(playback, &decoded, 0) != pdTRUE) {
@@ -358,10 +367,11 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                        !atomic_load(&awaiting_clear)) {
                 atomic_store(&epoch, e);
                 atomic_store(&end_pending, false);
-                atomic_store(&listen_after, microphone_deadline());
+                atomic_store(&listen_after,
+                             atomic_load(&live_mode) ? now_ms() : microphone_deadline());
                 atomic_store(&can_listen, true);
                 atomic_store(&recording, atomic_load(&live_mode) && !atomic_load(&menu_active));
-                ui_set("LISTENING", "Hold OK: talk  UP: settings");
+                ui_set("LISTENING", "Hold OK: talk  DOWN+OK: menu");
             } else if (!strcmp(type, "playback_begin") && atomic_load(&ready) &&
                        !atomic_load(&awaiting_clear)) {
                 atomic_store(&can_listen, atomic_load(&full_duplex));
@@ -369,30 +379,41 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                 atomic_store(&end_pending, false);
                 atomic_store(&epoch, e);
                 atomic_store(&receive_last_ms, 0);
-                ui_set("SPEAKING", "Hold OK: talk  UP: settings");
+                if (!atomic_load(&live_mode)) {
+                    atomic_store(&interaction_active, true);
+                    ui_set("SPEAKING", "Tap OK: stop  UP/DOWN: volume");
+                }
             } else if (!strcmp(type, "playback_end") && atomic_load(&ready) &&
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
                 atomic_store(&end_pending, true);
             } else if (!strcmp(type, "clear") && atomic_load(&wanted)) {
                 mute();
                 atomic_store(&epoch, e);
-                atomic_store(&listen_after, microphone_deadline());
+                atomic_store(&listen_after,
+                             atomic_load(&live_mode) ? now_ms() : microphone_deadline());
                 bool capture = atomic_load(&live_mode) || atomic_load(&ptt_held);
                 atomic_store(&can_listen, capture);
                 atomic_store(&recording, capture && !atomic_load(&menu_active));
                 if (capture)
                     ui_set(atomic_load(&live_mode) ? "LISTENING" : "RECORDING",
                            "Release OK to send in hold mode");
+            } else if (!strcmp(type, "activity") && atomic_load(&live_mode)) {
+                cJSON *active = cJSON_GetObjectItem(m, "active");
+                atomic_store(&interaction_active, cJSON_IsTrue(active));
+                ui_set(cJSON_IsTrue(active) ? "LIVE CHATTING" : "LIVE LISTENING",
+                       "Tap OK: stop  UP/DOWN: volume");
             } else if (!strcmp(type, "waiting") && !atomic_load(&live_mode)) {
                 if (!atomic_load(&recording) && !atomic_load(&ptt_held)) {
                     atomic_store(&epoch, e);
+                    atomic_store(&interaction_active, false);
                     atomic_store(&awaiting_clear, false);
                     cJSON *too_long = cJSON_GetObjectItem(m, "too_long");
                     ui_set(cJSON_IsTrue(too_long) ? "RECORDING TOO LONG" : "HOLD TO TALK",
                            cJSON_IsTrue(too_long) ? "Not sent. Max 60 seconds"
-                                                  : "Hold OK, then speak\nUP: settings");
+                                                  : "Hold OK, then speak\nDOWN+OK: menu");
                 }
             } else if (!strcmp(type, "submitted")) {
+                atomic_store(&interaction_active, true);
                 if (!atomic_load(&ptt_held))
                     ui_set("THINKING", "Waiting for reply...");
             } else if (!strcmp(type, "probe_done")) {
@@ -434,21 +455,30 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         }
     }
 }
-static void button(bsp_btn_t key, bsp_btn_ev_t event, void *user)
+static void button(uint8_t keys, void *user)
 {
+    (void)user;
     static controls_t controls;
-    if (event != BSP_BTN_PRESS && event != BSP_BTN_RELEASE && event != BSP_BTN_LONG)
-        return;
-    control_event_t ev = event == BSP_BTN_PRESS  ? CONTROL_PRESS
-                         : event == BSP_BTN_LONG ? CONTROL_LONG
-                                                 : CONTROL_RELEASE;
     bool navigation =
         atomic_load(&menu_active) || atomic_load(&settings_open) || voice_wifi_provisioning();
-    control_action_t action = controls_event(&controls, (control_key_t)key, ev, navigation);
-    static const command_type_t mapping[] = {CMD_WAKE,        CMD_WAKE,    CMD_UP, CMD_DOWN,
-                                             CMD_PTT_PREPARE, CMD_PTT_END, CMD_OK, CMD_MENU_BACK};
-    if (action != CONTROL_NONE)
-        enqueue(mapping[action], 0);
+    uint32_t actions = controls_update(&controls, keys, now_ms(), navigation);
+    static const struct {
+        uint32_t bit;
+        command_type_t command;
+    } mapping[] = {{CONTROL_WAKE, CMD_WAKE},
+                   {CONTROL_PREPARE, CMD_PTT_PREPARE},
+                   {CONTROL_CANCEL_CAPTURE, CMD_CANCEL_CAPTURE},
+                   {CONTROL_RELEASE_PTT, CMD_PTT_END},
+                   {CONTROL_STOP, CMD_CANCEL},
+                   {CONTROL_SETTINGS, CMD_SETTINGS},
+                   {CONTROL_UP, CMD_UP},
+                   {CONTROL_DOWN, CMD_DOWN},
+                   {CONTROL_SAVE_VOLUME, CMD_VOLUME_SAVE},
+                   {CONTROL_SELECT, CMD_OK},
+                   {CONTROL_BACK, CMD_MENU_BACK}};
+    for (unsigned i = 0; i < sizeof(mapping) / sizeof(mapping[0]); i++)
+        if (actions & mapping[i].bit)
+            enqueue(mapping[i].command, 0);
 }
 static void cancel_pending_capture(void)
 {
@@ -471,9 +501,11 @@ static void show_home(void)
     ui_mode(live);
     ui_show_guide();
     if (atomic_load(&recording))
-        ui_set(live ? "LISTENING" : "RECORDING", "UP: settings");
+        ui_set(live ? "LISTENING" : "RECORDING", "DOWN+OK: menu");
     else if (atomic_load(&ready))
         ui_set(live ? "CHAT ACTIVE" : "HOLD TO TALK", "Hold OK: talk / interrupt");
+    else if (atomic_load(&starting))
+        ui_set("CONNECTING VOICE", "Please wait...");
     else
         idle_ui();
 }
@@ -482,22 +514,21 @@ static void start_session(void)
     if (!atomic_load(&wanted) || atomic_load(&starting) || atomic_load(&ready))
         return;
     if (!atomic_load(&connected)) {
-        ui_set("SERVER NOT CONNECTED", "UP: network settings");
+        ui_set("SERVER NOT CONNECTED", "DOWN+OK: menu");
         return;
     }
     settings_t p = settings_get();
     bool live = atomic_load(&live_mode);
-    atomic_store(&session_full_duplex, p.duplex);
-    atomic_store(&full_duplex, live && p.duplex);
+    atomic_store(&full_duplex, live);
     atomic_store(&can_listen, false);
     atomic_store(&starting, true);
     atomic_store(&started_at, now_ms());
     char start[320];
     snprintf(start, sizeof(start),
-             "{\"type\":\"start\",\"protocol\":5,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
+             "{\"type\":\"start\",\"protocol\":6,\"mode\":\"%s\",\"voice\":\"%s\",\"pace\":%d,"
              "\"reply_length\":%d,\"language\":%d,\"duplex\":%d,\"idle_seconds\":%d}",
              live ? "continuous" : "ptt", settings_voice(p.voice), p.pace, p.reply_length,
-             p.language, p.duplex, p.idle_seconds);
+             p.language, 1, p.idle_seconds);
     if (!send_json(start))
         retry();
     else
@@ -516,6 +547,7 @@ static void stop_session(void)
     atomic_store(&starting, false);
     atomic_store(&sticky_error, false);
     mute();
+    atomic_store(&interaction_active, false);
     send_json("{\"type\":\"stop\"}");
 }
 static void close_menu(void)
@@ -597,7 +629,10 @@ static void command_task(void *unused)
             apply_device_settings();
             if (action == MENU_CLOSE)
                 close_menu();
-            else if (action == MENU_NEW_CHAT) {
+            else if (action == MENU_LIVE) {
+                atomic_store(&menu_active, false);
+                enqueue(CMD_LIVE, 0);
+            } else if (action == MENU_NEW_CHAT) {
                 atomic_store(&menu_active, false);
                 ui_show_guide();
                 atomic_store(&restart_pending, atomic_load(&connected));
@@ -627,14 +662,34 @@ static void command_task(void *unused)
             }
             continue;
         }
-        if (c.type == CMD_UP || c.type == CMD_SETTINGS) {
+        if (c.type == CMD_UP || c.type == CMD_DOWN) {
+            settings_adjust_volume(c.type == CMD_UP ? 5 : -5);
+            apply_device_settings();
+            ui_volume(settings_get().volume);
+        } else if (c.type == CMD_VOLUME_SAVE) {
+            if (settings_save(settings_get()) != ESP_OK)
+                ESP_LOGW(TAG, "volume persistence failed");
+        } else if (c.type == CMD_CANCEL_CAPTURE) {
+            cancel_pending_capture();
+        } else if (c.type == CMD_CANCEL) {
+            if ((atomic_load(&ready) || atomic_load(&starting)) &&
+                atomic_exchange(&interaction_active, false)) {
+                mute();
+                atomic_store(&awaiting_clear, true);
+                atomic_store(&output_timing_pending, false);
+                if (!send_json("{\"type\":\"cancel\"}"))
+                    retry();
+                else
+                    ui_set("STOPPED", "Context kept. Hold OK: talk");
+            }
+        } else if (c.type == CMD_SETTINGS) {
             cancel_pending_capture();
             atomic_store(&menu_active, true);
             if (atomic_load(&live_mode)) {
                 atomic_store(&recording, false);
                 send_json("{\"type\":\"pause\"}");
             }
-            menu_open();
+            menu_open(atomic_load(&live_mode));
         } else if (c.type == CMD_NEW_START || c.type == CMD_CONNECT) {
             if (c.type == CMD_NEW_START) {
                 atomic_store(&wanted, true);
@@ -659,7 +714,7 @@ static void command_task(void *unused)
                 continue;
             if (!atomic_load(&connected)) {
                 cancel_pending_capture();
-                ui_set("SERVER NOT CONNECTED", "UP: network settings");
+                ui_set("SERVER NOT CONNECTED", "DOWN+OK: menu");
                 continue;
             }
             atomic_store(&live_mode, false);
@@ -704,12 +759,13 @@ static void command_task(void *unused)
                 atomic_store(&recording, false);
                 atomic_store(&released_at, now_ms());
                 atomic_store(&output_timing_pending, true);
+                atomic_store(&interaction_active, true);
                 if (!send_json("{\"type\":\"ptt_end\"}"))
                     retry();
                 else if (!atomic_load(&menu_active))
                     ui_set("THINKING", "Waiting for reply...");
             }
-        } else if (c.type == CMD_DOWN) {
+        } else if (c.type == CMD_LIVE) {
             cancel_pending_capture();
             bool live = !atomic_load(&live_mode);
             atomic_store(&live_mode, live);
@@ -717,7 +773,7 @@ static void command_task(void *unused)
             atomic_store(&output_timing_pending, false);
             mute();
             if (atomic_load(&ready) || atomic_load(&starting)) {
-                atomic_store(&full_duplex, live && atomic_load(&session_full_duplex));
+                atomic_store(&full_duplex, live);
                 atomic_store(&awaiting_clear, true);
                 if (!send_json(live ? "{\"type\":\"mode\",\"mode\":\"continuous\"}"
                                     : "{\"type\":\"mode\",\"mode\":\"ptt\"}"))
@@ -812,6 +868,15 @@ static void speaker_task(void *unused)
         uint32_t now = now_ms();
         UBaseType_t queued = uxQueueMessagesWaiting(playback);
         bool have = false;
+        // Bound live latency after a network burst; never accumulate seconds of stale speech.
+        if (atomic_load(&live_mode) && queued > 24) {
+            while (uxQueueMessagesWaiting(playback) > PLAYBACK_PREFILL) {
+                if (xQueueReceive(playback, &frame, 0) != pdTRUE)
+                    break;
+                atomic_fetch_add(&dropped_frames, 1);
+            }
+            queued = uxQueueMessagesWaiting(playback);
+        }
         memset(&frame, 0, sizeof(frame));
         if (!atomic_load(&ready) || (atomic_load(&recording) && !atomic_load(&full_duplex)) ||
             atomic_load(&awaiting_clear)) {
@@ -838,8 +903,10 @@ static void speaker_task(void *unused)
                 }
             }
         }
-        if (have && (!atomic_load(&recording) || atomic_load(&full_duplex)) &&
+        if (have && frame.epoch == atomic_load(&epoch) &&
+            (!atomic_load(&recording) || atomic_load(&full_duplex)) &&
             !atomic_load(&awaiting_clear)) {
+            maximum(&playback_age_max_ms, now - frame.received_at);
             last_write = now;
             atomic_store(&last_output_at, now);
             atomic_fetch_add(&speaker_frames, 1);
@@ -905,7 +972,7 @@ static void console_task(void *unused)
         if (!strcmp(line, "connect"))
             enqueue(CMD_NEW_START, 0);
         else if (!strcmp(line, "live"))
-            enqueue(CMD_DOWN, 0);
+            enqueue(CMD_LIVE, 0);
         else if (!strcmp(line, "stop"))
             enqueue(CMD_STOP, 0);
     }

@@ -12,3 +12,5 @@ void ui_show_guide(void);
 void ui_show_menu(const char *title, const char *const *items, int count, int selected,
                   const char *hint);
 void ui_mode(bool continuous);
+
+void ui_volume(int volume);

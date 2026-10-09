@@ -4,7 +4,7 @@
 #include "freertos/semphr.h"
 #include <assert.h>
 #include <stdbool.h>
-static settings_t prefs = {70, 65, 60, 180, 0, 0, 0, 0, 0, 0};
+static settings_t prefs = {70, 65, 60, 180, 0, 0, 0, 0, 0, 1};
 static const char *voices[VOICE_COUNT] = {"cove", "juniper", "maple", "spruce", "ember",
                                           "vale", "breeze",  "arbor", "sol"};
 const char *settings_voice(int i)
@@ -59,6 +59,7 @@ void settings_init(void)
     if (loaded)
         prefs = saved;
     nvs_close(n);
+    prefs.duplex = 1;
 }
 settings_t settings_get(void)
 {
@@ -69,6 +70,7 @@ settings_t settings_get(void)
 }
 esp_err_t settings_save(settings_t p)
 {
+    p.duplex = 1; // Retired NVS field; live is always full duplex.
     if (!valid(p))
         return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -84,4 +86,15 @@ esp_err_t settings_save(settings_t p)
         prefs = p;
     xSemaphoreGive(lock);
     return err;
+}
+
+void settings_adjust_volume(int delta)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    prefs.volume += delta;
+    if (prefs.volume < 0)
+        prefs.volume = 0;
+    if (prefs.volume > 100)
+        prefs.volume = 100;
+    xSemaphoreGive(lock);
 }
