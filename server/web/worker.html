@@ -1,9 +1,10 @@
 <!doctype html><meta charset="utf-8"><title>mic-on media worker</title>
+<script src="/voice_setup.js"></script>
 <script>
 'use strict';
 const ws = new WebSocket(`ws://${location.host}/worker?id=${encodeURIComponent(location.hash.slice(1))}`);
 ws.binaryType = 'arraybuffer';
-let ctx, pc, input, capture, channel, inputEnabled = false, started = false;
+let ctx, pc, input, capture, channel, voiceSetup, inputEnabled = false, started = false;
 const report = value => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); };
 const fail = error => report({type:'error', message:String(error)});
 ws.onopen = async () => {
@@ -34,10 +35,15 @@ ws.onopen = async () => {
       ctx.createMediaStreamSource(stream).connect(capture).connect(mute);
     };
     channel=pc.createDataChannel('oai-events');
-    channel.onopen=()=>{started=true;report({type:'ready'});};
+    channel.onopen=()=>{
+      const voice=new URLSearchParams(location.search).get('voice');
+      if(!voice){fail('missing voice configuration');return;}
+      voiceSetup=new VoiceSetup(channel,voice,confirmed=>{started=true;report({type:'ready',voice:confirmed,voice_ack:true});},fail);
+    };
     channel.onmessage=({data})=>{
       try {
         const event=JSON.parse(data);
+        if(voiceSetup?.handle(event)) return;
         // This v3 subscription channel is not the public Realtime event schema.
         if(event.type==='input_transcript.added' || event.type==='output_transcript.added')
           report({type:'transcript_delta',role:event.type==='input_transcript.added'?'user':'assistant',text:event.item?.text||''});
@@ -61,6 +67,6 @@ ws.onmessage=async({data})=>{
     if(event.type==='input'){inputEnabled=Boolean(event.enabled);if(event.clear)input.port.postMessage('clear');}
   } catch(error){fail(error);}
 };
-ws.onclose=()=>{pc?.close();ctx?.close();};
+ws.onclose=()=>{voiceSetup?.close();pc?.close();ctx?.close();};
 window.onunhandledrejection=event=>fail(event.reason);
 </script>

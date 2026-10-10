@@ -2,6 +2,7 @@
 #include "device.h"
 #include "settings.h"
 #include "wifi.h"
+#include "wifi_profiles.h"
 #include "ui.h"
 #include "cJSON.h"
 #include "esp_app_desc.h"
@@ -29,7 +30,7 @@ bool portal_updating(void)
 void portal_arm(void)
 {
     if (device_busy() || portal_updating()) {
-        ui_set("SETTINGS UNAVAILABLE", "请重新进入手机设置");
+        ui_set("SETTINGS UNAVAILABLE", "Reopen web setup");
         return;
     }
     atomic_store(&armed_until, esp_timer_get_time() / 1000000 + 300);
@@ -77,6 +78,13 @@ static esp_err_t info(httpd_req_t *r)
     cJSON_AddNumberToObject(j, "mode", p.mode);
     cJSON_AddNumberToObject(j, "voice", p.voice);
     cJSON_AddNumberToObject(j, "duplex", p.duplex);
+    wifi_profiles_t profiles;
+    if (wifi_profiles_load(&profiles) == ESP_OK) {
+        cJSON *networks = cJSON_AddArrayToObject(j, "wifi_networks");
+        for (unsigned i = 0; i < profiles.count; ++i)
+            cJSON_AddItemToArray(networks, cJSON_CreateString(profiles.entries[i].ssid));
+    }
+    memset(&profiles, 0, sizeof(profiles));
     device_add_diagnostics(j);
     char *s = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -118,9 +126,9 @@ static int integer(cJSON *j, const char *key)
 static esp_err_t save(httpd_req_t *r)
 {
     if (!authorized(r))
-        return error(r, "403 Forbidden", "请刷新设置页后再试");
+        return error(r, "403 Forbidden", "Refresh this page and retry.");
     if (portal_updating())
-        return error(r, "409 Conflict", "固件更新中，请稍后再保存设置");
+        return error(r, "409 Conflict", "Update in progress. Save settings after the update.");
     cJSON *j = read_json(r);
     settings_t p = {.volume = integer(j, "volume"),
                     .brightness = integer(j, "brightness"),
@@ -134,18 +142,18 @@ static esp_err_t save(httpd_req_t *r)
     esp_err_t e = settings_save(p);
     if (e != ESP_OK)
         return error(r, e == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error",
-                     "保存失败，请检查设置后重试");
+                     "Could not save. Check your settings and retry.");
     bool voice_changed = p.voice != previous.voice;
     device_apply_settings(voice_changed);
-    return error(r, "200 OK", voice_changed ? "音色已保存，正在清空上下文并自动开启新对话"
-                                            : "设置已保存；空闲超时将在下次新对话生效");
+    return error(r, "200 OK", voice_changed ? "Voice saved. Clearing context and starting a new session."
+                                            : "Settings saved. Idle timeout applies to the next session.");
 }
 static esp_err_t netcheck(httpd_req_t *r)
 {
     if (!authorized(r))
         return error(r, "403 Forbidden", "Refresh settings first");
     if (device_busy() || portal_updating())
-        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
+        return error(r, "409 Conflict", "Reopen Device > Web setup / update on the device.");
     device_netcheck();
     return error(r, "200 OK", "12 second silent network check queued; no microphone or GPT");
 }
@@ -157,39 +165,45 @@ static void restart(void *arg)
 static esp_err_t wifi(httpd_req_t *r)
 {
     if (!authorized(r))
-        return error(r, "403 Forbidden", "请刷新设置页后再试");
+        return error(r, "403 Forbidden", "Refresh this page and retry.");
     if (device_busy())
-        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
+        return error(r, "409 Conflict", "Reopen Device > Web setup / update on the device.");
     cJSON *j = read_json(r), *ssid = cJSON_GetObjectItem(j, "ssid"),
-          *password = cJSON_GetObjectItem(j, "password");
-    esp_err_t e = cJSON_IsString(ssid) && cJSON_IsString(password)
-                      ? voice_wifi_save(ssid->valuestring, password->valuestring)
-                      : ESP_ERR_INVALID_ARG;
+          *password = cJSON_GetObjectItem(j, "password"),
+          *forget = cJSON_GetObjectItem(j, "forget");
+    bool removing = cJSON_IsString(forget);
+    esp_err_t e = removing ? wifi_profiles_forget(forget->valuestring)
+                          : cJSON_IsString(ssid) && cJSON_IsString(password)
+                                ? voice_wifi_save(ssid->valuestring, password->valuestring)
+                                : ESP_ERR_INVALID_ARG;
     cJSON_Delete(j);
     if (e != ESP_OK)
-        return error(r, "400 Bad Request", "Wi-Fi 保存失败，请检查输入");
+        return error(r, "400 Bad Request", e == ESP_ERR_NO_MEM
+                     ? "8 networks saved. Forget one first."
+                     : "Could not save Wi-Fi. Check your input.");
     atomic_store(&updating, true);
     ui_show_guide();
-    ui_set("WI-FI SAVED", "设备即将重启");
-    error(r, "200 OK", "Wi-Fi 已保存，设备即将重启");
+    ui_set("WI-FI SAVED", "Restarting device");
+    error(r, "200 OK", removing ? "Network forgotten. Restarting device."
+                               : "Wi-Fi saved; other networks kept. Restarting device.");
     xTaskCreate(restart, "restart", 2048, NULL, 4, NULL);
     return ESP_OK;
 }
 static esp_err_t update(httpd_req_t *r)
 {
     if (!authorized(r))
-        return error(r, "403 Forbidden", "请刷新设置页后再试");
+        return error(r, "403 Forbidden", "Refresh this page and retry.");
     if (esp_timer_get_time() / 1000000 >= atomic_load(&armed_until))
-        return error(r, "403 Forbidden", "请在「设备设置」中进入「手机设置与固件更新」");
+        return error(r, "403 Forbidden", "Open Device > Web setup / update on the device.");
     atomic_store(&updating, true);
     if (device_busy()) {
         atomic_store(&updating, false);
-        return error(r, "409 Conflict", "请在设备设置中重新进入「手机设置与固件更新」");
+        return error(r, "409 Conflict", "Reopen Device > Web setup / update on the device.");
     }
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     if (!slot || r->content_len < 1024 || r->content_len > slot->size) {
         atomic_store(&updating, false);
-        return error(r, "400 Bad Request", "固件大小无效");
+        return error(r, "400 Bad Request", "Invalid firmware size.");
     }
     char buffer[1024];
     const size_t prefix_size =
@@ -199,7 +213,7 @@ static esp_err_t update(httpd_req_t *r)
         int n = httpd_req_recv(r, buffer + total, prefix_size - total);
         if (n <= 0) {
             atomic_store(&updating, false);
-            return error(r, "400 Bad Request", "上传中断，原固件保持不变");
+            return error(r, "400 Bad Request", "Upload interrupted. Current firmware is unchanged.");
         }
         total += n;
     }
@@ -211,17 +225,17 @@ static esp_err_t update(httpd_req_t *r)
         strncmp(description.project_name, "passport-gpt-live", sizeof(description.project_name)) !=
             0) {
         atomic_store(&updating, false);
-        return error(r, "400 Bad Request", "请选择此设备的 passport-gpt-live.bin 应用固件");
+        return error(r, "400 Bad Request", "Select the passport-gpt-live.bin application image for this device.");
     }
     esp_ota_handle_t handle;
     esp_err_t e = esp_ota_begin(slot, OTA_WITH_SEQUENTIAL_WRITES, &handle);
     if (e != ESP_OK) {
         atomic_store(&updating, false);
-        return error(r, "500 Internal Server Error", "无法准备升级，请重启设备后再试");
+        return error(r, "500 Internal Server Error", "Could not prepare update. Restart the device and retry.");
     }
     ui_wake();
     ui_show_guide();
-    ui_set("UPDATING", "请保持供电，勿关机");
+    ui_set("UPDATING", "Keep power connected");
     e = esp_ota_write(handle, buffer, total);
     int last_percent = -10;
     while (e == ESP_OK && total < r->content_len) {
@@ -238,7 +252,7 @@ static esp_err_t update(httpd_req_t *r)
         int percent = total * 100 / r->content_len;
         if (percent / 10 != last_percent / 10) {
             char detail[64];
-            snprintf(detail, sizeof(detail), "已上传 %d%%\n请保持供电，勿关机", percent);
+            snprintf(detail, sizeof(detail), "Uploaded %d%%\nKeep power connected", percent);
             ui_set("UPDATING", detail);
             last_percent = percent;
         }
@@ -251,12 +265,12 @@ static esp_err_t update(httpd_req_t *r)
         e = esp_ota_set_boot_partition(slot);
     if (e != ESP_OK) {
         atomic_store(&updating, false);
-        ui_set("UPDATE FAILED", "已保留原固件\n请重新尝试更新");
-        return error(r, "400 Bad Request", "上传或固件校验失败，已保留原固件");
+        ui_set("UPDATE FAILED", "Firmware unchanged\nRetry the update");
+        return error(r, "400 Bad Request", "Upload or validation failed. Current firmware is unchanged.");
     }
     atomic_store(&armed_until, 0);
-    ui_set("UPDATE COMPLETE", "设备即将重启");
-    error(r, "200 OK", "固件已校验并保存，设备即将重启。请稍后刷新页面。");
+    ui_set("UPDATE COMPLETE", "Restarting device");
+    error(r, "200 OK", "Firmware verified and saved. Restarting. Refresh this page shortly.");
     xTaskCreate(restart, "restart", 2048, NULL, 4, NULL);
     return ESP_OK;
 }

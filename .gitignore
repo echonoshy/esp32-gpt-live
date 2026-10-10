@@ -26,6 +26,7 @@ rustc-ice-*.txt
 # Local tools, device credentials, recordings and build products
 .tools/
 artifacts/
+data/
 .env
 .env.*
 !.env.example
@@ -35,3 +36,6 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/main/device_config.h
 __pycache__/
+*.py[cod]
+.DS_Store
+output/

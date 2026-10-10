@@ -26,6 +26,7 @@ def log(kind, **values):
 
 
 def codex():
+    log("codex_options", args=sys.argv)
     for line in sys.stdin:
         m = json.loads(line)
         method, params = m["method"], m.get("params", {})
@@ -35,12 +36,15 @@ def codex():
         if method == "account/read":
             result = {"account": {"type": "chatgpt", "planType": "test"}}
         elif method == "thread/start":
-            log("thread_config", base=params.get("baseInstructions"), developer=params.get("developerInstructions"))
+            assert params.get("environments") != [], "empty environments disables native tools"
+            log("thread_config", base=params.get("baseInstructions"), developer=params.get("developerInstructions"),
+                cwd=params["cwd"], permissions=params.get("permissions"), approval=params["approvalPolicy"])
             result = {"thread": {"id": str(uuid.uuid4())}}
         elif method == "thread/realtime/appendText":
             log("interrupt", thread=params["threadId"])
         elif method == "thread/realtime/start":
-            log("session", thread=params["threadId"], voice=params["voice"], prompt=params["prompt"])
+            log("session", thread=params["threadId"], voice=params["voice"], prompt=params["prompt"],
+                context=params["initialItems"], handoffs=params["clientManagedHandoffs"])
             time.sleep(0.4)  # Buffer microphone input through startup.
         print(json.dumps({"id": m["id"], "result": result}), flush=True)
         if method == "thread/realtime/start":
@@ -49,7 +53,10 @@ def codex():
 
 async def worker():
     url = next(x for x in sys.argv if x.startswith("http://"))
-    origin, ident = url.split("/media#")
+    from urllib.parse import urlsplit, parse_qs
+    parsed = urlsplit(url)
+    origin, ident = f"{parsed.scheme}://{parsed.netloc}", parsed.fragment
+    voice = parse_qs(parsed.query)['voice'][0]
     async with websockets.connect(origin.replace("http:", "ws:") + "/worker?id=" + ident) as ws:
         await ws.send(json.dumps({"type": "offer", "sdp": "offline"}))
         enabled = False
@@ -88,7 +95,7 @@ async def worker():
                     e = json.loads(m)
                     if e["type"] == "answer":
                         ready = True
-                        await ws.send(json.dumps({"type": "ready"}))
+                        await ws.send(json.dumps({"type": "ready", "voice": voice, "voice_ack": True}))
                     if e["type"] == "input":
                         enabled = e["enabled"]
                         log("input", enabled=enabled, worker=ident)
@@ -108,7 +115,10 @@ async def check():
     with tempfile.TemporaryDirectory(prefix="passport-offline-") as td:
         temp = Path(td)
         logpath = temp / "events.jsonl"
-        env = dict(os.environ, PASSPORT_TEST_LOG=str(logpath), DEVICE_TOKEN="", RUST_LOG="error")
+        context_dir = temp / "context"
+        context_dir.mkdir()
+        env = dict(os.environ, PASSPORT_TEST_LOG=str(logpath), DEVICE_TOKEN="", RUST_LOG="error",
+                   VOICE_CONTEXT_DIR=str(context_dir))
         for name in ("codex", "worker"):
             script = temp / name
             import shlex
@@ -161,10 +171,21 @@ async def check():
                 assert events("session")[0]["voice"] == "juniper"
                 prompt = events("session")[0]["prompt"]
                 assert all(s not in prompt for s in ("普通话", "自然英语", "语速", "一句话", "简短回答"))
-                assert events("thread_config")[0] == {"kind": "thread_config", "base": prompt, "developer": prompt}
+                config = events("thread_config")[0]
+                assert config["base"] == config["developer"] and "python3" in config["base"]
+                assert config["permissions"] == "mic-on" and config["approval"] == "never"
+                assert Path(config["cwd"]) == context_dir.resolve()
+                options = events("codex_options")[0]["args"]
+                assert 'web_search="live"' in options and 'features.shell_tool=true' in options
+                assert 'permissions.mic-on.network.enabled=false' in options
+                assert 'shell_environment_policy.inherit="none"' in options
+                assert events("session")[0]["context"] == []
+                assert events("session")[0]["handoffs"] is False
                 # New chat requires a stop acknowledgement and a fresh Codex thread.
                 await send("stop")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "stopped" for m in messages))
+                saved_context = "测试上下文：项目叫 mic-on。"
+                (context_dir / "CONTEXT.md").write_text(saved_context)
                 messages.clear()
                 await send("start", protocol=3, mode="continuous", duplex=0, voice="cove")
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "listen" for m in messages))
@@ -172,6 +193,8 @@ async def check():
                 assert len(sessions) == 2 and sessions[0]["thread"] != sessions[1]["thread"]
                 assert sessions[0]["prompt"] == sessions[1]["prompt"], "retired style fields changed instructions"
                 assert sessions[1]["voice"] == "cove"
+                assert saved_context in sessions[1]["context"][0]["text"]
+                assert events("thread_config")[1]["cwd"] == config["cwd"]
                 count=len(events("audio"))
                 for _ in range(10):
                     await ws.send(struct.pack("<h", 1200) * 480)
@@ -264,11 +287,15 @@ async def check():
                 messages.clear()
                 await send("mode", mode="continuous")
                 await until(lambda: any(isinstance(m, dict) and m.get("mode") == "continuous" for m in messages))
+                # Recover 2.4 seconds of TCP backlog at once: never overflow the
+                # small media bridge, and never dump a burst into the AudioWorklet.
                 count = len(events("audio"))
-                for _ in range(10):
+                for _ in range(120):
                     await ws.send(struct.pack("<h", 1200) * 480)
-                    await asyncio.sleep(0.02)
-                await until(lambda: len(events("audio")) == count + 10)
+                await until(lambda: len(events("audio")) == count + 120)
+                burst = events("audio")[count:]
+                assert burst[-1]["at"] - burst[0]["at"] > 2.0, "LIVE backlog was not paced"
+                assert not any(isinstance(m, dict) and m.get("type") == "error" for m in messages), "LIVE backlog disconnected session"
                 await until(lambda: any(isinstance(m, dict) and m.get("type") == "playback_begin" for m in messages))
                 count = len(events("audio"))
                 for _ in range(6):
@@ -277,6 +304,11 @@ async def check():
                 messages.clear()
                 count = len(events("audio"))
                 await send("ptt_start")
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'clear' for m in messages))
+                # Old epoch packets may already be on the wire before clear. The
+                # new epoch, which firmware admits, must stay silent while held.
+                boundary = next(i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('type') == 'clear')
+                del messages[:boundary + 1]
                 for _ in range(20):
                     await ws.send(struct.pack("<h", 1200) * 480)
                     await asyncio.sleep(0.02)
@@ -337,6 +369,51 @@ async def check():
                 await send('stop')
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
                 print('PASS: protocol 7 batches and final 3-frame tail arrive before release; older protocols remain supported')
+                # Home cancels an unfinished recording (no ptt_end) and pauses live input.
+                # Run once during startup too: queued navigation must not reopen the mic.
+                for initial_mode in ('ptt', 'continuous'):
+                    messages.clear()
+                    await send('start', protocol=7, mode=initial_mode)
+                    if initial_mode == 'ptt':
+                        await send('ptt_start')
+                        await ws.send(packet * 4)
+                    await send('pause')
+                    await send('cancel')
+                    await until(lambda: any(isinstance(m, dict) and m.get('type') == 'clear' for m in messages))
+                    await asyncio.sleep(0.25)
+                    assert not events('input')[-1]['enabled'], 'home reopened microphone during startup'
+                    count = len(events('audio'))
+                    session_count = len(events('session'))
+                    messages.clear()
+                    for _ in range(4):
+                        await ws.send(packet * 4)  # Late frames after the user's back gesture.
+                    await asyncio.sleep(0.5)
+                    assert len(events('audio')) == count, 'home forwarded cancelled recording'
+                    assert not any(isinstance(m, bytes) for m in messages), 'home leaked old reply audio'
+                    assert not any(isinstance(m, dict) and m.get('type') == 'submitted' for m in messages)
+                    # Either home entry can resume the existing thread, repeatedly.
+                    for target_mode in ('continuous', 'ptt', 'continuous'):
+                        messages.clear()
+                        await send('mode', mode=target_mode)
+                        await until(lambda: any(isinstance(m, dict) and m.get('mode') == target_mode for m in messages))
+                        if target_mode == 'ptt':
+                            await send('ptt_start')
+                        count = len(events('audio'))
+                        for _ in range(3):
+                            await ws.send(packet * 4)
+                        await until(lambda: len(events('audio')) == count + 12)
+                        assert all(e['enabled'] for e in events('audio')[count:])
+                        assert len(events('session')) == session_count, 'home navigation reset conversation'
+                        if target_mode == 'ptt':
+                            await send('ptt_end')
+                        await send('pause')
+                        await send('cancel')
+                        await asyncio.sleep(0.15)
+                        assert not events('input')[-1]['enabled']
+                    messages.clear()
+                    await send('stop')
+                    await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                print('PASS: home cancels unsent speech, stays silent during startup, resumes both modes without resetting context')
                 # Voice changes use the same stop/stopped/start boundary in both input modes.
                 for mode in ('ptt', 'continuous'):
                     previous_thread = None
@@ -344,6 +421,8 @@ async def check():
                         messages.clear()
                         await send('start', protocol=7, mode=mode, voice=voice)
                         await until(lambda: any(isinstance(m, dict) and m.get('state') == 'ready' for m in messages))
+                        acknowledged = next(m for m in messages if isinstance(m, dict) and m.get('state') == 'ready')
+                        assert acknowledged.get('voice') == voice, 'device did not receive confirmed voice'
                         current = events('session')[-1]
                         assert current['voice'] == voice and current['thread'] != previous_thread
                         previous_thread = current['thread']
@@ -366,6 +445,19 @@ async def check():
                 assert all(len(m) == 248 for m in messages if isinstance(m, bytes))
                 await send('stop')
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                # Protocol 8 coalesces downlink frames, bounded by four packets;
+                # controls flush a partial tail before playback_end/stopped.
+                messages.clear()
+                await send('probe', protocol=8)
+                await until(lambda: sum(len(m)//248 for m in messages if isinstance(m, bytes)) >= 12)
+                await send('stop')
+                await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                packets = [m for m in messages if isinstance(m, bytes)]
+                assert any(len(m) > 248 for m in packets), 'downlink never batched'
+                assert all(len(m) in (248, 496, 744, 992) for m in packets)
+                assert all(m[i:i+4] == b'\x01\x00\x00\x00' for m in packets for i in range(0, len(m), 248))
+                assert len(events('session')) == sessions_before_probe
+                print('PASS: LIVE 2.4 second backlog is paced without disconnect; protocol 8 downlink batches retain independent epochs')
                 # Late microphone frames after shutdown must not close the bridge.
                 for _ in range(8):
                     await ws.send(bytes(244))

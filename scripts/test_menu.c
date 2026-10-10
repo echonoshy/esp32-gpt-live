@@ -4,8 +4,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-static settings_t prefs = {.volume = 70, .brightness = 65, .screen_seconds = 60,
-                          .idle_seconds = 180, .duplex = 1};
+static settings_t prefs = {
+    .volume = 70, .brightness = 65, .screen_seconds = 60, .idle_seconds = 180, .duplex = 1};
 static char title[64];
 static int focus, row_count;
 static char rows[10][64];
@@ -40,103 +40,126 @@ void ui_show_menu(const char *t, const char *const *items, int count, int select
                   const char *hint)
 {
     assert(selected >= 0 && selected < count);
-    assert(strstr(hint, "长按 OK 返回上一级"));
+    assert(strstr(hint, "Hold OK: back"));
     snprintf(title, sizeof(title), "%s", t);
     focus = selected;
     row_count = count;
     for (int i = 0; i < count; i++) {
-        assert(strcmp(items[i], "结束对话"));
+        assert(strcmp(items[i], "End session"));
         snprintf(rows[i], sizeof(rows[i]), "%s", items[i]);
     }
 }
+void ui_show_home(int selected)
+{
+    assert(selected >= 0 && selected < 3);
+    snprintf(title, sizeof(title), "HOME");
+    focus = selected;
+    row_count = 3;
+}
+static void settings_root(void)
+{
+    menu_open(2);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "SETTINGS"));
+    assert(row_count == 5 && focus == 0);
+}
 int main(void)
 {
-    menu_open(false);
-    assert(row_count == 6 && !strcmp(rows[1], "重置上下文"));
-    assert(menu_key(0) == MENU_LIVE);
-    assert(menu_back() == MENU_CLOSE);
+    menu_open(0);
+    assert(!strcmp(title, "HOME") && row_count == 3 && focus == 0);
+    assert(menu_back() == MENU_NONE && focus == 0);
+    assert(menu_key(0) == MENU_CHAT);
     menu_key(1);
-    assert(menu_key(0) == MENU_NONE); // Entering confirmation must not reset context.
-    assert(!strcmp(title, "重置上下文？"));
-    assert(menu_back() == MENU_NONE && !strcmp(title, "快捷菜单") && focus == 1);
+    assert(menu_key(0) == MENU_LIVE);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "SETTINGS"));
+    assert(menu_back() == MENU_NONE && !strcmp(title, "HOME") && focus == 2);
+    menu_key(1);
+    assert(focus == 0);
+    menu_key(-1);
+    assert(focus == 2);
+    // Home always remembers which entry returned; an invalid selection is clamped.
+    menu_open(1);
+    assert(focus == 1 && menu_key(0) == MENU_LIVE);
+    menu_open(99);
+    assert(focus == 0);
+    settings_root();
+    menu_key(0);
+    assert(!strcmp(title, "VOICE SELECT"));
+    menu_key(1);
+    assert(menu_key(0) == MENU_VOICE_CHANGED && prefs.voice == 1);
+    assert(!strcmp(title, "VOICE SELECT") && focus == 1);
+    assert(!strncmp(rows[1], "* ", 2) && strncmp(rows[0], "* ", 2));
+    int saved = saves;
+    assert(menu_key(0) == MENU_NONE && saves == saved);
+    assert(!strcmp(title, "VOICE SELECT") && focus == 1);
+    menu_key(1);
+    menu_back();
+    assert(prefs.voice == 1 && !strcmp(title, "SETTINGS"));
+    menu_key(0);
+    menu_key(-1);
+    menu_key(-1);
+    menu_key(0); // Explicit back row from voice list.
+    assert(prefs.voice == 1 && !strcmp(title, "SETTINGS"));
+    // Device values, focus and explicit/hold back have identical hierarchy.
+    menu_key(1);
+    menu_key(0);
+    menu_key(0);
+    menu_key(-1);
+    menu_back();
+    assert(!strcmp(title, "DEVICE") && prefs.volume == 75 && focus == 0);
+    for (int i = 0; i < 3; i++)
+        menu_key(1);
+    menu_key(0);
+    menu_key(-1);
+    menu_key(0);
+    assert(focus == 3 && prefs.idle_seconds == 300);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "OPEN WEB SETUP?"));
+    assert(menu_back() == MENU_NONE && focus == 4);
     menu_key(0);
     menu_key(1);
-    assert(menu_key(0) == MENU_NONE && !strcmp(title, "快捷菜单")); // Cancel row.
+    assert(menu_key(0) == MENU_NONE && focus == 4);
+    menu_key(0);
+    assert(menu_key(0) == MENU_PHONE);
+    menu_refresh();
+    assert(!strcmp(title, "DEVICE") && focus == 4);
+    menu_back();
+    assert(!strcmp(title, "SETTINGS") && focus == 1);
+    menu_key(1);
+    menu_key(0);
+    menu_key(0);
+    assert(!strcmp(title, "WI-FI SETUP?"));
+    menu_back();
+    menu_key(1);
+    menu_key(0);
+    assert(!strcmp(title, "CONNECTION"));
+    menu_back();
+    menu_back();
+    assert(!strcmp(title, "SETTINGS") && focus == 2);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "RESET CONTEXT?"));
+    menu_back();
+    assert(focus == 3);
+    menu_key(0);
+    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && focus == 3); // Cancel preserves context.
     menu_key(0);
     assert(menu_key(0) == MENU_NEW_CHAT); // Only explicit confirmation resets.
     menu_back();
     menu_key(1);
-    menu_key(0); // Root opens voice selection directly.
-    assert(!strcmp(title, "选择音色"));
-    menu_key(1);
-    assert(menu_key(0) == MENU_VOICE_CHANGED); // A successful change restarts the conversation.
-    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
-    int saved = saves;
-    menu_key(0);
-    assert(menu_key(0) == MENU_NONE && saves == saved); // Re-selecting the same voice is inert.
-    menu_key(0); // Focus stays on voice; reopen at the saved choice.
-    assert(!strcmp(title, "选择音色"));
-    menu_key(1);
-    menu_back();
-    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
-    // The explicit back row also returns to root without changing the voice.
-    menu_key(0);
-    menu_key(-1);
-    menu_key(-1);
-    menu_key(0);
-    assert(prefs.voice == 1 && !strcmp(title, "快捷菜单"));
-    menu_key(1);
-    menu_key(0); // Device
-    menu_key(0);
-    menu_key(-1); // Volume +5 saved before returning
-    menu_back();
-    assert(!strcmp(title, "设备设置") && prefs.volume == 75);
-    for (int i = 0; i < 3; i++)
-        menu_key(1);
-    assert(strstr(rows[focus], "空闲结束"));
-    menu_key(0);
-    menu_key(-1);
-    menu_key(0);
-    assert(!strcmp(title, "设备设置") && focus == 3 && prefs.idle_seconds == 300);
-    menu_key(1);
-    assert(menu_key(0) == MENU_NONE && !strcmp(title, "进入手机设置？"));
-    assert(menu_back() == MENU_NONE && !strcmp(title, "设备设置") && focus == 4);
-    menu_key(0);
-    menu_key(1);
-    assert(menu_key(0) == MENU_NONE && !strcmp(title, "设备设置") && focus == 4);
-    menu_key(0);
-    assert(menu_key(0) == MENU_PHONE); // Maintenance also requires explicit confirmation.
-    menu_refresh();
-    assert(!strcmp(title, "设备设置") && focus == 4); // QR exit returns here.
-    menu_back();
-    menu_key(1);
-    menu_key(1);
-    menu_key(1);
-    menu_key(1);
-    menu_key(0); // Network
-    menu_key(0);
-    assert(!strcmp(title, "重新配置网络？"));
-    menu_back();
-    assert(!strcmp(title, "网络设置"));
-    menu_key(1);
-    menu_key(0);
-    assert(!strcmp(title, "连接信息"));
-    menu_back();
-    assert(!strcmp(title, "网络设置"));
-    menu_back();
-    assert(menu_back() == MENU_CLOSE);
-    menu_open(true);
-    menu_key(1);
-    menu_key(1);
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "HOME") && focus == 2);
+    settings_root();
     menu_key(0);
     menu_key(1);
     save_fails = true;
-    assert(menu_key(0) == MENU_NONE && prefs.voice == 1 && !strcmp(title, "保存失败"));
+    assert(menu_key(0) == MENU_NONE && prefs.voice == 1 && !strcmp(title, "SAVE FAILED"));
     save_fails = false;
-    assert(menu_key(0) == MENU_VOICE_CHANGED && prefs.voice == 2); // Retry the same choice in live mode.
-    assert(!strcmp(rows[0], "退出畅聊")); // Saving a voice does not switch input mode.
-    menu_key(0);
+    assert(menu_key(0) == MENU_VOICE_CHANGED && prefs.voice == 2);
+    assert(!strcmp(title, "VOICE SELECT") && focus == 2);
+    assert(!strncmp(rows[2], "* ", 2));
+    assert(menu_key(0) == MENU_NONE && !strcmp(title, "VOICE SELECT"));
     menu_key(1);
-    assert(menu_back() == MENU_NONE && prefs.voice == 2); // Cancel keeps the saved voice.
-    puts("PASS: voice-change restart action, unchanged/cancel/failure, retry in live mode, reset and maintenance navigation");
+    assert(menu_back() == MENU_NONE && prefs.voice == 2 && !strcmp(title, "SETTINGS"));
+    puts("PASS: three home entries, wrap/focus, settings hierarchy, voice save/retry, "
+         "reset/maintenance confirmation");
 }

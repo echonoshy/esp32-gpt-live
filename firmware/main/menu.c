@@ -6,6 +6,7 @@
 #include <string.h>
 
 typedef enum {
+    HOME,
     ROOT,
     DEVICE,
     NETWORK,
@@ -21,13 +22,15 @@ typedef enum {
 } page_t;
 static page_t page;
 static int selected;
-static bool live_mode;
 static const int sleeps[] = {15, 30, 60, 120, 300, 600};
 static const int timeouts[] = {60, 180, 300, 600, 900};
 static int count(void)
 {
     switch (page) {
+    case HOME:
+        return 3;
     case ROOT:
+        return 5;
     case DEVICE:
         return 6;
     case NETWORK:
@@ -53,78 +56,80 @@ static bool editing(void)
 }
 void menu_refresh(void)
 {
+    if (page == HOME) {
+        ui_show_home(selected);
+        return;
+    }
     settings_t p = settings_get();
-    char rows[10][64] = {{0}}, title[48] = "设置", hint[128] = "上下选择，OK 确认";
+    char rows[10][64] = {{0}}, title[48] = "SETTINGS", hint[128] = "UP/DN: select / OK";
     switch (page) {
     case ROOT:
-        snprintf(title, sizeof(title), "快捷菜单");
-        snprintf(rows[0], sizeof(rows[0]), "%s畅聊", live_mode ? "退出" : "开启");
-        snprintf(rows[1], sizeof(rows[1]), "重置上下文");
-        snprintf(rows[2], sizeof(rows[2]), "音色：%s", settings_voice(p.voice));
-        snprintf(rows[3], sizeof(rows[3]), "设备设置");
-        snprintf(rows[4], sizeof(rows[4]), "网络设置");
-        snprintf(rows[5], sizeof(rows[5]), "返回聊天");
+        snprintf(rows[0], sizeof(rows[0]), "Voice: %s", settings_voice(p.voice));
+        snprintf(rows[1], sizeof(rows[1]), "Device");
+        snprintf(rows[2], sizeof(rows[2]), "Network");
+        snprintf(rows[3], sizeof(rows[3]), "Reset context");
+        snprintf(rows[4], sizeof(rows[4]), "Back to home");
         break;
     case DEVICE:
-        snprintf(title, sizeof(title), "设备设置");
-        snprintf(rows[0], sizeof(rows[0]), "音量：%d", p.volume);
-        snprintf(rows[1], sizeof(rows[1]), "亮度：%d", p.brightness);
-        snprintf(rows[2], sizeof(rows[2]), "自动息屏：%d 秒", p.screen_seconds);
-        snprintf(rows[3], sizeof(rows[3]), "空闲结束：%d 秒", p.idle_seconds);
-        snprintf(rows[4], sizeof(rows[4]), "手机设置与固件更新");
-        snprintf(rows[5], sizeof(rows[5]), "返回上一级");
+        snprintf(title, sizeof(title), "DEVICE");
+        snprintf(rows[0], sizeof(rows[0]), "Volume: %d", p.volume);
+        snprintf(rows[1], sizeof(rows[1]), "Brightness: %d", p.brightness);
+        snprintf(rows[2], sizeof(rows[2]), "Screen off: %d s", p.screen_seconds);
+        snprintf(rows[3], sizeof(rows[3]), "Idle end: %d s", p.idle_seconds);
+        snprintf(rows[4], sizeof(rows[4]), "Web setup / update");
+        snprintf(rows[5], sizeof(rows[5]), "Back");
         break;
     case NETWORK:
-        snprintf(title, sizeof(title), "网络设置");
-        snprintf(rows[0], sizeof(rows[0]), "扫码连接无线网络");
-        snprintf(rows[1], sizeof(rows[1]), "查看连接信息");
-        snprintf(rows[2], sizeof(rows[2]), "返回上一级");
+        snprintf(title, sizeof(title), "NETWORK");
+        snprintf(rows[0], sizeof(rows[0]), "Connect Wi-Fi");
+        snprintf(rows[1], sizeof(rows[1]), "Connection info");
+        snprintf(rows[2], sizeof(rows[2]), "Back");
         break;
     case PICK_VOICE:
-        snprintf(title, sizeof(title), "选择音色");
+        snprintf(title, sizeof(title), "VOICE SELECT");
         for (int i = 0; i < VOICE_COUNT; i++)
             snprintf(rows[i], sizeof(rows[i]), "%s%s", i == p.voice ? "* " : "", settings_voice(i));
-        snprintf(rows[VOICE_COUNT], sizeof(rows[VOICE_COUNT]), "返回上一级");
-        snprintf(hint, sizeof(hint), "换音色自动新开对话");
+        snprintf(rows[VOICE_COUNT], sizeof(rows[VOICE_COUNT]), "Back");
+        snprintf(hint, sizeof(hint), "Saved / next chat uses voice");
         break;
     case CONFIRM_NEW:
-        snprintf(title, sizeof(title), "重置上下文？");
-        snprintf(rows[0], sizeof(rows[0]), "确认清空并新建");
-        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
-        snprintf(hint, sizeof(hint), "原对话内容将清空");
+        snprintf(title, sizeof(title), "RESET CONTEXT?");
+        snprintf(rows[0], sizeof(rows[0]), "Clear and restart");
+        snprintf(rows[1], sizeof(rows[1]), "Back");
+        snprintf(hint, sizeof(hint), "Clears this session");
         break;
     case CONFIRM_PHONE:
-        snprintf(title, sizeof(title), "进入手机设置？");
-        snprintf(rows[0], sizeof(rows[0]), "确认进入");
-        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
-        snprintf(hint, sizeof(hint), "当前对话将结束并清空");
+        snprintf(title, sizeof(title), "OPEN WEB SETUP?");
+        snprintf(rows[0], sizeof(rows[0]), "End session / open");
+        snprintf(rows[1], sizeof(rows[1]), "Back");
+        snprintf(hint, sizeof(hint), "Ends / clears session");
         break;
     case CONFIRM_WIFI:
-        snprintf(title, sizeof(title), "重新配置网络？");
-        snprintf(rows[0], sizeof(rows[0]), "重启并进入配网");
-        snprintf(rows[1], sizeof(rows[1]), "返回上一级");
-        snprintf(hint, sizeof(hint), "保留原网络，结束对话");
+        snprintf(title, sizeof(title), "WI-FI SETUP?");
+        snprintf(rows[0], sizeof(rows[0]), "Restart into setup");
+        snprintf(rows[1], sizeof(rows[1]), "Back");
+        snprintf(hint, sizeof(hint), "Keeps saved Wi-Fi");
         break;
     case INFO: {
         char ip[20];
         voice_wifi_ip(ip, sizeof(ip));
-        snprintf(title, sizeof(title), "连接信息");
-        snprintf(rows[0], sizeof(rows[0]), "%s", voice_wifi_connected() ? ip : "无线网络未连接");
-        snprintf(hint, sizeof(hint), "短按 OK 返回");
+        snprintf(title, sizeof(title), "CONNECTION");
+        snprintf(rows[0], sizeof(rows[0]), "%s", voice_wifi_connected() ? ip : "Wi-Fi offline");
+        snprintf(hint, sizeof(hint), "OK: back");
         break;
     }
     default:
-        snprintf(title, sizeof(title), "调整设置");
-        snprintf(rows[0], sizeof(rows[0]), "%s：%d",
-                 page == EDIT_VOLUME   ? "音量"
-                 : page == EDIT_BRIGHT ? "亮度"
-                 : page == EDIT_SCREEN ? "息屏秒数"
-                                       : "空闲秒数",
+        snprintf(title, sizeof(title), "ADJUST");
+        snprintf(rows[0], sizeof(rows[0]), "%s: %d",
+                 page == EDIT_VOLUME   ? "Volume"
+                 : page == EDIT_BRIGHT ? "Brightness"
+                 : page == EDIT_SCREEN ? "Screen off (s)"
+                                       : "Idle end (s)",
                  page == EDIT_VOLUME   ? p.volume
                  : page == EDIT_BRIGHT ? p.brightness
                  : page == EDIT_SCREEN ? p.screen_seconds
                                        : p.idle_seconds);
-        snprintf(hint, sizeof(hint), "上下调整，OK 返回");
+        snprintf(hint, sizeof(hint), "UP/DN: adjust / OK");
         break;
     }
     const char *items[10];
@@ -132,25 +137,28 @@ void menu_refresh(void)
     char *line = strchr(hint, '\n');
     if (line)
         *line = 0;
-    strncat(hint, "\n长按 OK 返回上一级", sizeof(hint) - strlen(hint) - 1);
+    strncat(hint, "\nHold OK: back", sizeof(hint) - strlen(hint) - 1);
     for (int i = 0; i < 10; i++)
         items[i] = rows[i];
     ui_show_menu(title, items, count(), selected, hint);
 }
-void menu_open(bool live)
+void menu_open(int selection)
 {
-    live_mode = live;
-    enter(ROOT);
+    enter(HOME);
+    selected = selection >= 0 && selection < 3 ? selection : 0;
     menu_refresh();
 }
 menu_action_t menu_back(void)
 {
     switch (page) {
+    case HOME:
+        return MENU_NONE;
     case ROOT:
-        return MENU_CLOSE;
+        enter(HOME);
+        selected = 2;
+        break;
     case PICK_VOICE:
         enter(ROOT);
-        selected = 2;
         break;
     case EDIT_VOLUME:
     case EDIT_BRIGHT:
@@ -161,7 +169,7 @@ menu_action_t menu_back(void)
         break;
     case CONFIRM_NEW:
         enter(ROOT);
-        selected = 1;
+        selected = 3;
         break;
     case CONFIRM_PHONE:
         enter(DEVICE);
@@ -171,8 +179,15 @@ menu_action_t menu_back(void)
     case INFO:
         enter(NETWORK);
         break;
-    default:
+    case DEVICE:
         enter(ROOT);
+        selected = 1;
+        break;
+    case NETWORK:
+        enter(ROOT);
+        selected = 2;
+        break;
+    default:
         break;
     }
     menu_refresh();
@@ -214,12 +229,17 @@ menu_action_t menu_key(int key)
         selected = (selected + key + count()) % count();
     else
         switch (page) {
-        case ROOT:
+        case HOME:
             if (selected == 0)
+                return MENU_CHAT;
+            if (selected == 1)
                 return MENU_LIVE;
-            if (selected == 5)
-                return MENU_CLOSE;
-            enter((page_t[]){CONFIRM_NEW, PICK_VOICE, DEVICE, NETWORK}[selected - 1]);
+            enter(ROOT);
+            break;
+        case ROOT:
+            if (selected == 4)
+                return menu_back();
+            enter((page_t[]){PICK_VOICE, DEVICE, NETWORK, CONFIRM_NEW}[selected]);
             if (page == PICK_VOICE)
                 selected = p.voice;
             break;
@@ -229,21 +249,28 @@ menu_action_t menu_key(int key)
             else if (selected == 4)
                 enter(CONFIRM_PHONE);
             else
-                enter(ROOT);
+                return menu_back();
             break;
         case NETWORK:
-            enter((page_t[]){CONFIRM_WIFI, INFO, ROOT}[selected]);
+            if (selected == 2)
+                return menu_back();
+            enter((page_t[]){CONFIRM_WIFI, INFO}[selected]);
             break;
         case PICK_VOICE:
-            if (selected == VOICE_COUNT || selected == p.voice)
+            if (selected == VOICE_COUNT)
                 return menu_back();
-            p.voice = selected;
-            if (settings_save(p) != ESP_OK) {
-                const char *message[] = {"设置保存失败", "请按 OK 重试"};
-                ui_show_menu("保存失败", message, 2, 0, "长按 OK 返回上一级");
+            if (selected == p.voice) {
+                menu_refresh();
                 return MENU_NONE;
             }
-            menu_back();
+            p.voice = selected;
+            if (settings_save(p) != ESP_OK) {
+                const char *message[] = {"Could not save", "OK: retry"};
+                ui_show_menu("SAVE FAILED", message, 2, 0, "Hold OK: back");
+                return MENU_NONE;
+            }
+            // Saving a preference never navigates away from its picker.
+            menu_refresh();
             return MENU_VOICE_CHANGED;
         case CONFIRM_NEW:
             if (selected == 0)
@@ -268,8 +295,8 @@ menu_action_t menu_key(int key)
             return menu_back();
         }
     if (changed && settings_save(p) != ESP_OK) {
-        const char *message[] = {"设置保存失败", "请按 OK 重试"};
-        ui_show_menu("保存失败", message, 2, 0, "设置未更改");
+        const char *message[] = {"Could not save", "OK: retry"};
+        ui_show_menu("SAVE FAILED", message, 2, 0, "Settings unchanged");
         return MENU_NONE;
     }
     menu_refresh();

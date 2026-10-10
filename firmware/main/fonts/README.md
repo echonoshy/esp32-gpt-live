@@ -1,20 +1,33 @@
-# 静态界面字形
+# 英文字体与字标
 
-设备只加载编译后的 2 bpp 字形子集。完整字体只用于构建，不打包进设备 RAM，也不在设备解析字体。
+0.9.0 起设备界面统一英文，使用 4 bpp / 16 级灰度字形。字形保存在 Flash，不在运行时加载完整字体；LVGL 静态池保持 24 KiB。
 
-- `ui_font_16.c`：Lora，顶部产品名称。
-- `ui_font_18.c`：Noto Sans CJK SC 中文与 Poppins ASCII，菜单和操作提示。
-- `ui_font_22.c`：Noto Serif CJK SC 中文与 Lora ASCII，大标题和状态。
+| 文件 | 字体 | 用途 |
+| --- | --- | --- |
+| `ui_font_14.c` | Barlow Semi Condensed Medium 14 px | 紧凑按键提示、电量与音量 |
+| `ui_font_16.c` | IBM Plex Mono Regular 16 px | 小节标签 |
+| `ui_font_18.c` | Barlow Semi Condensed Medium 18 px | 设置列表和正文 |
+| `ui_font_22.c` | Barlow Condensed Black Italic 22 px | 状态、设置标题、调节数值 |
+| `ui_font_comic_44.c` | Barlow Condensed Black Italic 44 px | 首页未选中项、Voice / Live 标题 |
+| `ui_font_comic_52.c` | Barlow Condensed Black Italic 52 px | 首页选中的 Settings |
+| `ui_font_comic_80.c` | Barlow Condensed Black Italic 80 px | 首页选中的 Voice / Live |
 
-字体均遵循 SIL Open Font License 1.1，各字体版权与许可在同目录 OFL 文件中。中文字体是适合本设备的视觉替代，并非 Anthropic 专有字体。
+设备字标使用 `../assets/ui_wordmark.c`，来源与生成方式见该目录 README。普通 UI 字体只含可打印 ASCII；44/52/80 px 标题字体只包含对应标题所需字符。手机设置页内联 Orbitron WOFF2 字标，无外部字体请求。移除了旧版专用于中文首页名称的额外字形文件。
 
-将以下字体保存到 `.tools/fonts/`，安装 `lv_font_conv` 后运行 `scripts/build_ui_fonts.py`；也可使用脚本参数指定路径。
+四款字体的 SIL OFL 1.1 许可分别保存在同目录 `OFL-ibmplexmono.txt`、`OFL-barlowsemicondensed.txt`、`OFL-barlowcondensed.txt`、`OFL-orbitron.txt`；其他许可供历史版本保留。
 
-- [NotoSansCJKsc-Regular.otf](https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf)
-  SHA-256: `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`
-- [NotoSerifCJKsc-Regular.otf](https://raw.githubusercontent.com/notofonts/noto-cjk/main/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf)
-  SHA-256: `2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca`
-- [Poppins-Regular.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Regular.ttf)
-  SHA-256: `7e65201e9b79159e2300267cc885e16c8dcef2424cdfa09a29bfb0980a94a7ba`
-- [Lora-Regular.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/lora/Lora%5Bwght%5D.ttf)
-  SHA-256: `822a6621ccbe8d97d20ac88c1c41f5615c9c2c202eaa75f272cd452aac6475a7`
+将以下原始字体放到 `.tools/fonts/`，使用 `fonttools[woff]` 4.66.1 与 `lv_font_conv` 1.5.3 生成。Orbitron 的变量字重固定为 900。生成的 C 和 HTML 已入库，正常固件编译不需要字体工具。
+
+```sh
+uv pip install --python .tools/python/bin/python 'fonttools[woff]==4.66.1'
+.tools/python/bin/python scripts/build_ui_fonts.py
+```
+
+- [IBMPlexMono-Regular.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexmono/IBMPlexMono-Regular.ttf)
+  SHA-256: `6a3412f058c7d8dfd9170c41e85ade48e5156ecb89356110ca57a0a27734af46`
+- [BarlowSemiCondensed-Medium.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/barlowsemicondensed/BarlowSemiCondensed-Medium.ttf)
+  SHA-256: `4998b693a190b76f2b11315844345a8546c1e2e6a320905507a9eed04edf8b48`
+- [BarlowCondensed-BlackItalic.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/barlowcondensed/BarlowCondensed-BlackItalic.ttf)
+  SHA-256: `75338266e60b15dfc5ac0bae8b78fdc5535ea50703ed73c14dc598498ffe8173`
+- [Orbitron-Variable.ttf](https://raw.githubusercontent.com/google/fonts/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf)
+  SHA-256: `f42db2dd16e642258e35782916eceb1dcdbea06fb958d77ad71dc5963587e8fd`

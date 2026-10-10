@@ -1,5 +1,6 @@
 mod adpcm;
 mod codex;
+mod context;
 mod conversation;
 mod live;
 mod preferences;
@@ -26,7 +27,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     process::Stdio,
     sync::{
@@ -62,8 +63,10 @@ fn status(name: &str) -> Message {
     text(json!({"type":"status","state":name}))
 }
 fn send(tx: &Tx, message: Message) -> Result<()> {
-    tx.try_send(message)
-        .map_err(|_| anyhow!("audio queue full or peer disconnected"))
+    tx.try_send(message).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => anyhow!("audio queue full"),
+        mpsc::error::TrySendError::Closed(_) => anyhow!("audio peer disconnected"),
+    })
 }
 fn valid_pcm(bytes: &[u8]) -> bool {
     bytes.len() == FRAME_BYTES
@@ -95,6 +98,9 @@ async fn main() -> Result<()> {
             "/media",
             get(|| async { Html(include_str!("../web/worker.html")) }),
         )
+        .route("/voice_setup.js", get(|| async {
+            ([("content-type", "text/javascript")], include_str!("../web/voice_setup.js"))
+        }))
         .route(
             "/worklet.js",
             get(|| async {
@@ -131,7 +137,7 @@ async fn main() -> Result<()> {
 
 async fn health(State(app): State<Shared>) -> Json<Value> {
     Json(
-        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":7,"version":env!("CARGO_PKG_VERSION")}),
+        json!({"ok":true,"device_connected":app.busy.load(Ordering::Relaxed),"sample_rate":24000,"frame_bytes":FRAME_BYTES,"protocol":8,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 
@@ -164,6 +170,16 @@ async fn device_upgrade(
         .on_upgrade(move |socket| device(socket, app, slot))
 }
 
+async fn write_device(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: Message,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), sink.send(message))
+        .await
+        .context("device socket write timeout")??;
+    Ok(())
+}
+
 async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let (mut sink, mut source) = socket.split();
     let (out, mut outgoing) = mpsc::channel(128);
@@ -172,8 +188,67 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let mut last_rx = tokio::time::Instant::now();
     let mut compressed = false;
     let mut batched = false;
-    let mut output_codec = adpcm::Encoder::default();
-    let _ = sink.send(status("idle")).await;
+    let wire_compressed = Arc::new(AtomicBool::new(false));
+    let writer_compressed = wire_compressed.clone();
+    let batch_downlink = Arc::new(AtomicBool::new(false));
+    let writer_batch = batch_downlink.clone();
+    // A slow device write must not stop reading its microphone or heartbeat.
+    let mut writer = tokio::spawn(async move {
+        let mut codec = adpcm::Encoder::default();
+        let mut batch = Vec::with_capacity(992);
+        let mut deadline = tokio::time::Instant::now();
+        loop {
+            let message = tokio::select! {
+                message = outgoing.recv() => match message { Some(m) => m, None => break },
+                _ = tokio::time::sleep_until(deadline), if !batch.is_empty() => {
+                    write_device(&mut sink, Message::Binary(std::mem::take(&mut batch).into())).await?;
+                    continue;
+                }
+            };
+            let message = match message {
+                Message::Binary(bytes) if writer_compressed.load(Ordering::Relaxed) => {
+                    if bytes.len() != FRAME_BYTES + 4 {
+                        bail!("invalid device output frame");
+                    }
+                    let mut packet = bytes[..4].to_vec();
+                    packet.extend(codec.encode(&bytes[4..]));
+                    if writer_batch.load(Ordering::Relaxed) {
+                        if batch.is_empty() {
+                            deadline = tokio::time::Instant::now() + Duration::from_millis(60);
+                        }
+                        batch.extend(packet);
+                        if batch.len() >= 992 {
+                            write_device(
+                                &mut sink,
+                                Message::Binary(std::mem::take(&mut batch).into()),
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
+                    Message::Binary(packet.into())
+                }
+                message => message,
+            };
+            // Partial audio precedes end/clear/status; never mix epochs or sessions.
+            if !batch.is_empty() {
+                write_device(
+                    &mut sink,
+                    Message::Binary(std::mem::take(&mut batch).into()),
+                )
+                .await?;
+            }
+            if matches!(message, Message::Close(_)) {
+                // Reading Close has already queued Tungstenite's acknowledgement.
+                let _ = tokio::time::timeout(Duration::from_secs(1), sink.flush()).await;
+                break;
+            }
+            write_device(&mut sink, message).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let _ = send(&out, status("idle"));
+    let mut graceful_close = false;
     tracing::info!("device connected");
     'device: loop {
         tokio::select! {
@@ -188,8 +263,8 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                 // They must not tear down an otherwise healthy device connection.
                 if session.as_ref().is_some_and(|(tx,_)|tx.is_closed()) {session=None}
                 match frame {
-                    Message::Close(_)=>{tracing::info!("device requested socket close");let _=sink.flush().await;break},
-                    Message::Ping(p)=>{if sink.send(Message::Pong(p)).await.is_err(){break}},
+                    Message::Close(close)=>{tracing::info!("device requested socket close");graceful_close=send(&out,Message::Close(close)).is_ok();break},
+                    Message::Ping(p)=>{if send(&out,Message::Pong(p)).is_err(){break}},
                     Message::Pong(_)=>{},
                     Message::Binary(bytes)=>{
                         let frames = if compressed {
@@ -218,7 +293,8 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                             if session.is_none() {
                                 compressed=v["protocol"].as_u64().unwrap_or(1)>=5;
                                 batched=v["protocol"].as_u64().unwrap_or(1)>=7;
-                                output_codec=adpcm::Encoder::default();
+                                wire_compressed.store(compressed, Ordering::Relaxed);
+                                batch_downlink.store(v["protocol"].as_u64().unwrap_or(1)>=8, Ordering::Relaxed);
                                 // Bounded startup backlog: preserve a held utterance while Codex connects.
                                 let (tx,rx)=mpsc::channel(if v["mode"]=="continuous" && v["protocol"].as_u64().unwrap_or(1)<4 {32} else {ptt::MAX_FRAMES + 8});
                                 let output=out.clone();let shared=app.clone();
@@ -228,7 +304,7 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                                     let result=if probe {run_probe(rx,output.clone()).await} else {run_session(shared,rx,output.clone(),prefs).await};
                                     if let Err(error)=result {
                                         // No account tokens, SDP or conversation text in logs.
-                                        tracing::warn!(%error,"voice session ended with error");
+                                        tracing::warn!(error=%format!("{error:#}"),"voice session ended with error");
                                         let _=send(&output,voice_error(&error));
                                     }
                                     let _=send(&output,status("idle"));
@@ -250,28 +326,20 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                     }
                 }
             },
-            Some(message)=outgoing.recv()=>{
-                let message=match message {
-                    Message::Binary(bytes) if compressed=>{
-                        if bytes.len()!=FRAME_BYTES+4 {break;}
-                        let mut packet=bytes[..4].to_vec();
-                        packet.extend(output_codec.encode(&bytes[4..]));
-                        Message::Binary(packet.into())
-                    },
-                    message=>message
-                };
-                match tokio::time::timeout(Duration::from_secs(5),sink.send(message)).await {
-                    Ok(Ok(()))=>{},
-                    Ok(Err(error))=>{tracing::warn!(%error,"device socket write failed");break},
-                    Err(_)=>{tracing::warn!("device socket write stalled for 5 seconds");break},
-                }
+            result=&mut writer=>{
+                tracing::warn!(?result,"device writer ended");
+                break;
             },
             _=heartbeat.tick()=>{
                 if last_rx.elapsed()>Duration::from_secs(45){tracing::warn!("device heartbeat receive timeout");break}
-                if sink.send(Message::Ping(Vec::new().into())).await.is_err(){break}
+                if send(&out,Message::Ping(Vec::new().into())).is_err(){break}
             }
         }
     }
+    if graceful_close && !writer.is_finished() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
+    }
+    writer.abort();
     if let Some((tx, mut task)) = session {
         drop(tx);
         if tokio::time::timeout(Duration::from_secs(6), &mut task)
@@ -309,20 +377,26 @@ async fn worker_upgrade(
             if waiter.send(Worker { tx, rx }).is_err() {
                 return;
             }
+            // Independent writer avoids a full receive queue blocking control/input.
+            let mut writer = tokio::spawn(async move {
+                while let Some(frame) = outgoing.recv().await {
+                    if sink.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+            });
             loop {
                 tokio::select! {
+                    _=&mut writer=>break,
                     frame=source.next()=>{
                         match frame {
                             Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
-                            Some(Ok(frame))=>if incoming.try_send(frame).is_err(){break},
+                            Some(Ok(frame))=>if incoming.send(frame).await.is_err(){break},
                         }
                     },
-                    frame=outgoing.recv()=>{
-                        let Some(frame)=frame else {break};
-                        if sink.send(frame).await.is_err(){break}
-                    }
                 }
             }
+            writer.abort();
         })
 }
 
@@ -429,7 +503,7 @@ async fn run_session(
             "--disable-renderer-backgrounding",
         ])
         .arg(format!("--user-data-dir={}", profile.path().display()))
-        .arg(format!("http://127.0.0.1:{}/media#{}", app.port, id))
+        .arg(format!("http://127.0.0.1:{}/media?voice={}#{}", app.port, prefs.voice, id))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -449,6 +523,9 @@ async fn run_session(
         let fast=prefs.fast_ptt;
         let tagged=prefs.tagged;
         let mut live=live::Live::default();
+        let mut live_input = VecDeque::new();
+        let mut live_tick = tokio::time::interval(Duration::from_millis(20));
+        live_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut live_playing=false;
         let mut live_active=false;
         let mut live_waiting=false;
@@ -483,6 +560,7 @@ async fn run_session(
                             match event["type"].as_str() {
                                 Some("stop")=>break,
                                 Some("cancel"|"interrupt")=>{
+                                    live_input.clear();live_tick.reset();
                                     // Explicit user action only: keep the same Codex thread.
                                     let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
                                     ptt.cancel();replies.clear();replay_tail=None;response_armed=false;
@@ -494,6 +572,7 @@ async fn run_session(
                                     last_activity=tokio::time::Instant::now();
                                 },
                                 Some("mode") if fast=>{
+                                    live_input.clear();live_tick.reset();
                                     last_activity=tokio::time::Instant::now();
                                     continuous=event["mode"]=="continuous";
                                     live.cancel();live_playing=false;live_active=false;live_waiting=false;
@@ -521,14 +600,17 @@ async fn run_session(
                                     }
                                 },
                                 Some("pause")=>{
+                                    live_input.clear();live_tick.reset();
                                     paused=true;
                                     send(&worker.tx,text(json!({"type":"input","enabled":false,"clear":true})))?;
                                 },
                                 Some("resume")=>{
+                                    live_input.clear();live_tick.reset();
                                     paused=false;last_activity=tokio::time::Instant::now();
                                     send(&worker.tx,text(json!({"type":"input","enabled":continuous,"clear":true})))?;
                                 },
                                 Some("ptt_start") if !continuous || fast=>{
+                                    live_input.clear();live_tick.reset();
                                     let interrupt_old = response_armed || continuous;
                                     continuous=false;paused=false;live_playing=false;live_active=false;live_waiting=false;
                                     ptt.start();replies.clear();replay_tail=None;released=None;first_output=true;first_model_audio=true;
@@ -569,7 +651,10 @@ async fn run_session(
                                 user_energy_frames+=1;
                                 if user_energy_frames>=4 {last_activity=tokio::time::Instant::now();}
                             } else {user_energy_frames=0;}
-                            send(&worker.tx,Message::Binary(bytes))?;
+                            // TCP recovery delivers several seconds in one burst. Pace
+                            // those frames instead of overflowing the 32-frame worker queue.
+                            if live_input.len() >= 150 { bail!("live input queue exceeded 3 seconds"); }
+                            live_input.push_back(bytes);
                         },
                         _=>{}
                     }
@@ -607,7 +692,7 @@ async fn run_session(
                                 }
                                 if tagged {
                                     let mut frame=flow.epoch.to_le_bytes().to_vec();frame.extend_from_slice(&bytes);
-                                    send(&output,Message::Binary(frame.into()))?;
+                                    send(&output,Message::Binary(frame.into())).context("live audio to device")?;
                                 } else {send(&output,Message::Binary(bytes))?;}
                                 continue;
                             }
@@ -644,7 +729,12 @@ async fn run_session(
                             let value:Value=serde_json::from_str(&s)?;
                             match value["type"].as_str() {
                                 Some("ready")=>{
-                                    ready=true;send(&output,status("ready"))?;
+                                    if value["voice"].as_str() != Some(prefs.voice.as_str()) || value["voice_ack"] != true {
+                                        bail!("voice configuration was not acknowledged");
+                                    }
+                                    ready=true;
+                                    tracing::info!(voice=%prefs.voice,"voice configuration acknowledged");
+                                    send(&output,text(json!({"type":"status","state":"ready","voice":prefs.voice})))?;
                                     if continuous {
                                         send(&worker.tx,text(json!({"type":"input","enabled":!paused,"clear":true})))?;
                                         send(&output,text(json!({"type":"listen","epoch":flow.epoch})))?;
@@ -681,6 +771,11 @@ async fn run_session(
                             }
                         },
                         _=>{}
+                    }
+                },
+                _=live_tick.tick(), if ready && continuous && !paused=>{
+                    if let Some(bytes) = live_input.pop_front() {
+                        send(&worker.tx,Message::Binary(bytes)).context("live microphone to media worker")?;
                     }
                 },
                 _=replay_tick.tick(), if ready && !continuous && ptt.input_active()=>{

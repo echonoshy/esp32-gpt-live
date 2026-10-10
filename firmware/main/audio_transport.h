@@ -28,9 +28,13 @@ static inline bool uplink_append(uplink_batch_t *batch, const uint8_t *packet, u
 }
 
 #define PLAYBACK_FRAMES 128
-#define PLAYBACK_LIVE_PREFILL 12
-#define PLAYBACK_PTT_PREFILL 40
-#define PLAYBACK_PTT_REFILL 60
+// Both modes collect 500 ms of audio at startup and after an underrun.
+// The 2.56-second queue capacity remains available for recovered network bursts.
+#define PLAYBACK_TARGET_FRAMES 25
+#define PLAYBACK_LIVE_PREFILL PLAYBACK_TARGET_FRAMES
+#define PLAYBACK_LIVE_REFILL PLAYBACK_TARGET_FRAMES
+#define PLAYBACK_PTT_PREFILL PLAYBACK_TARGET_FRAMES
+#define PLAYBACK_PTT_REFILL PLAYBACK_TARGET_FRAMES
 typedef struct {
     uint32_t epoch, since;
     bool playing, waiting;
@@ -48,8 +52,8 @@ static inline bool playback_gate_ready(playback_gate_t *g, unsigned queued, bool
                                        uint32_t now)
 {
     if (!queued) {
-        if (g->playing && !ended && !live)
-            g->target = PLAYBACK_PTT_REFILL;
+        if (g->playing && !ended)
+            g->target = live ? PLAYBACK_LIVE_REFILL : PLAYBACK_PTT_REFILL;
         g->playing = g->waiting = false;
         return false;
     }
@@ -59,7 +63,7 @@ static inline bool playback_gate_ready(playback_gate_t *g, unsigned queued, bool
         g->waiting = true;
         g->since = now;
     }
-    if (queued >= g->target || ended || now - g->since >= (live ? 350u : 1500u)) {
+    if (queued >= g->target || ended || now - g->since >= (live ? 650u : 1500u)) {
         g->playing = true;
         g->waiting = false;
     }

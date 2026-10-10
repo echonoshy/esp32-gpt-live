@@ -1,4 +1,4 @@
-"""Provision Wi-Fi over USB without credentials in source or command arguments."""
+"""Add/update a saved Wi-Fi over USB; keep other networks and avoid exposing credentials."""
 import argparse
 import getpass
 import json
@@ -28,10 +28,10 @@ try:
     while time.monotonic() < deadline:
         buffer.extend(port.read(1024))
         if b"WIFI_CONFIG_SAVED" in buffer:
-            print("Wi-Fi saved on device. It is restarting.")
+            print("Wi-Fi saved; other networks kept. Device is restarting.")
             break
         if b"WIFI_CONFIG_INVALID" in buffer:
-            raise SystemExit("Device rejected Wi-Fi settings")
+            raise SystemExit("Device rejected Wi-Fi settings. Check credentials; if 8 networks are saved, forget one in web setup.")
     else:
         raise SystemExit("No acknowledgement. Check the USB port and firmware.")
 finally:

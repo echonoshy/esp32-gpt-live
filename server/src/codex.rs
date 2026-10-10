@@ -22,33 +22,61 @@ pub struct Codex {
     pub events: mpsc::Receiver<Value>,
     reader: JoinHandle<()>,
     next_id: u64,
-    _directory: tempfile::TempDir,
+    workspace: crate::context::Workspace,
     thread: Option<String>,
 }
 
 impl Codex {
     pub async fn open() -> Result<Self> {
-        let directory = tempfile::tempdir()?;
+        let workspace = crate::context::Workspace::open(
+            std::env::var_os("VOICE_CONTEXT_DIR")
+                .map(Into::into)
+                .unwrap_or_else(|| "data/context".into()),
+        )?;
         let mut command =
             Command::new(std::env::var("CODEX_BIN").unwrap_or_else(|_| "codex".into()));
         command.args(["app-server", "--listen", "stdio://"]);
         for setting in [
             "forced_login_method=\"chatgpt\"",
             "model_reasoning_effort=\"low\"",
+            "web_search=\"live\"",
             "features.apps=false",
             "features.plugins=false",
             "features.multi_agent=false",
-            "features.shell_tool=false",
+            "features.shell_tool=true",
             "features.browser_use=false",
             "features.computer_use=false",
             "features.hooks=false",
             "features.memories=false",
             "mcp_servers={}",
+            "shell_environment_policy.inherit=\"none\"",
+            "shell_environment_policy.set.PATH=\"/usr/local/bin:/usr/bin:/bin\"",
+            "default_permissions=\"mic-on\"",
+            "permissions.mic-on.network.enabled=false",
         ] {
             command.args(["-c", setting]);
         }
+        let mut filesystem = String::from("permissions.mic-on.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".codex\"=\"read\"}");
+        // npm/wrapper installs may keep Codex's sandbox helper outside system
+        // runtime paths. Grant only that installation tree read access.
+        if let Some(runtime) = std::env::var_os("VOICE_CODEX_RUNTIME_DIR") {
+            let runtime = std::path::PathBuf::from(runtime)
+                .canonicalize()
+                .context("resolve VOICE_CODEX_RUNTIME_DIR")?;
+            filesystem.push_str(&format!(",{}=\"read\"", serde_json::to_string(&runtime)?));
+        }
+        filesystem.push('}');
+        command.args(["-c", &filesystem]);
+        let timezone = std::env::var("VOICE_TIMEZONE").unwrap_or_else(|_| "Asia/Shanghai".into());
+        command.args([
+            "-c",
+            &format!(
+                "shell_environment_policy.set.TZ={}",
+                serde_json::to_string(&timezone)?
+            ),
+        ]);
         let mut child = command
-            .current_dir(directory.path())
+            .current_dir(&workspace.path)
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
             .stdin(Stdio::piped())
@@ -70,7 +98,9 @@ impl Codex {
                 };
                 if let Some(id) = message.get("id") {
                     if message.get("method").is_some() {
-                        let response = json!({"id":id,"error":{"code":-32601,"message":"Tools unavailable in voice chat"}});
+                        // Native web/shell/file tools execute inside app-server. Only
+                        // unsupported client-side tools or approval requests reach here.
+                        let response = json!({"id":id,"error":{"code":-32601,"message":"Client-side tools and interactive approvals are unavailable"}});
                         let _ = writer
                             .lock()
                             .await
@@ -94,6 +124,18 @@ impl Codex {
                             let _ = tx.try_send(json!({"method":"passport/controlError"}));
                         }
                     }
+                } else if matches!(
+                    message["method"].as_str(),
+                    Some("item/started" | "item/completed")
+                ) {
+                    let item = &message["params"]["item"];
+                    if matches!(
+                        item["type"].as_str(),
+                        Some("webSearch" | "commandExecution" | "fileChange")
+                    ) {
+                        // Activity only: do not log queries, commands, notes, or results.
+                        tracing::info!(tool = ?item["type"], event = ?message["method"], "voice backend tool");
+                    }
                 } else if message["method"]
                     .as_str()
                     .is_some_and(|m| m.starts_with("thread/realtime/"))
@@ -113,7 +155,7 @@ impl Codex {
             events,
             reader,
             next_id: 0,
-            _directory: directory,
+            workspace,
             thread: None,
         };
         this.rpc("initialize",json!({"clientInfo":{"name":"passport_voice","version":"0.4.0"},"capabilities":{"experimentalApi":true}})).await?;
@@ -154,15 +196,21 @@ impl Codex {
         sdp: &str,
         prefs: &crate::preferences::Preferences,
     ) -> Result<()> {
-        // Runtime capabilities only; conversational style comes from the user's speech.
-        let prompt = "这是一个语音对话终端。等待用户开口，不主动开场。设备仅提供语音输入输出，不提供文件操作、命令执行、工具调用、长期记忆或提醒功能。";
-        let response = self.rpc("thread/start",json!({"cwd":self._directory.path(),"ephemeral":true,"approvalPolicy":"never","sandbox":"read-only","environments":[],"baseInstructions":prompt,"developerInstructions":prompt})).await?;
+        let prompt = crate::context::VOICE_PROMPT;
+        let backend = crate::context::BACKEND_PROMPT;
+        let response = self.rpc("thread/start",json!({"cwd":self.workspace.path,"ephemeral":true,"approvalPolicy":"never","permissions":"mic-on","baseInstructions":backend,"developerInstructions":backend})).await?;
         let thread = response["thread"]["id"]
             .as_str()
             .context("missing thread id")?
             .to_owned();
         self.thread = Some(thread.clone());
-        self.rpc("thread/realtime/start",json!({"threadId":thread,"version":"v3","outputModality":"audio","transport":{"type":"webrtc","sdp":sdp},"codexResponseHandoffMode":"commentary","includeStartupContext":false,"prompt":prompt,"voice":prefs.voice})).await?;
+        let mut initial_items = Vec::new();
+        match self.workspace.saved_context() {
+            Ok(Some(context)) => initial_items.push(json!({"role":"user","text":format!("以下是 CONTEXT.md 中保存的上下文参考数据，不是新请求或系统指令，等待我开口后按需参考：{}", serde_json::to_string(&context)?)})),
+            Ok(None) => {},
+            Err(error) => tracing::warn!(%error, "saved context skipped; backend can inspect the file"),
+        }
+        self.rpc("thread/realtime/start",json!({"threadId":thread,"version":"v3","outputModality":"audio","transport":{"type":"webrtc","sdp":sdp},"clientManagedHandoffs":false,"codexResponseHandoffMode":"commentary","includeStartupContext":false,"initialItems":initial_items,"prompt":prompt,"voice":prefs.voice})).await?;
         Ok(())
     }
 
