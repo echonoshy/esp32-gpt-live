@@ -15,8 +15,8 @@ section{padding:24px;margin:24px 0;background:var(--surface);border:3px solid va
 label{display:block;margin:20px 0;font-weight:650}output{color:var(--pink);float:right;font-family:ui-monospace,monospace}input,select,button{font:inherit}input[type=range]{width:100%;accent-color:var(--pink);margin-top:12px}
 button{background:var(--pink);color:var(--surface);border:2px solid var(--border);border-radius:0;padding:12px 20px;cursor:pointer;font-weight:800;letter-spacing:.02em;box-shadow:3px 3px 0 var(--accent);transition:transform 140ms,box-shadow 140ms}button:hover{transform:translate(-1px,-1px);box-shadow:5px 5px 0 var(--accent)}button:active{transform:translate(2px,2px);box-shadow:none}button:disabled{opacity:.5;cursor:wait}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--purple);outline-offset:3px}
-input[type=text],input[type=password],select{width:100%;padding:12px;border:2px solid var(--border);border-radius:0;margin-top:8px;background:#fffdf4;color:var(--text)}input[type=file]{max-width:100%;color:var(--muted)}input::file-selector-button{font:inherit;padding:10px 12px;margin-right:12px;background:var(--accent);color:var(--text);border:2px solid var(--border);cursor:pointer}
-small,p{color:var(--muted);line-height:1.65}#notice{white-space:pre-wrap;color:var(--accent);line-height:1.6}progress{width:100%;accent-color:var(--pink)}@media(max-width:400px){body{margin:24px auto;padding:0 14px}section{padding:18px}h2{font-size:24px}}@media(prefers-reduced-motion:reduce){button{transition:none}}
+input[type=text],input[type=password],select{width:100%;padding:12px;border:2px solid var(--border);border-radius:0;margin-top:8px;background:#fffdf4;color:var(--text)}
+small,p{color:var(--muted);line-height:1.65}#notice{white-space:pre-wrap;color:var(--accent);line-height:1.6}@media(max-width:400px){body{margin:24px auto;padding:0 14px}section{padding:18px}h2{font-size:24px}}@media(prefers-reduced-motion:reduce){button{transition:none}}
 </style>
 <h1>mic-on</h1><p id="status">CONNECTING...</p>
 <section><h2>01 / AUDIO &amp; DISPLAY</h2><form id="prefs">
@@ -30,50 +30,17 @@ small,p{color:var(--muted);line-height:1.65}#notice{white-space:pre-wrap;color:v
 <p>Saving a different voice clears context and starts a new session in the current mode. Saving the same voice keeps the session. Ask the assistant directly to change language, pace or response length.</p>
 <button>SAVE SETTINGS</button><p>Idle timeout applies to the next session. Device volume changes save automatically. Volume 0 is mute.</p></form></section>
 <section><h2>02 / CONTROLS</h2><p>HOME: UP/DOWN selects VOICE, LIVE or SETTINGS. Tap OK to enter. Hold OK for 0.6 seconds to return. Settings return one level at a time; voice screens return home.</p><p>VOICE: tap OK to record, tap again to send. During a response, tap OK to stop. LIVE: speak hands-free, including during playback. Tap OK to stop a reply.</p><p>UP/DOWN adjusts volume by 5 in voice screens; hold to repeat. Returning home discards unsent input and pauses the microphone and playback. Context is retained while the session remains active. Reset context requires confirmation. The power button controls hardware power.</p></section>
-<section><h2>03 / FIRMWARE</h2><p>Update on the device: SETTINGS &gt; DEVICE &gt; Firmware update. Check / install latest downloads and installs the firmware automatically. Keep power connected. Browser upload is reserved for older firmware with an upload window.</p><p id="update-window"></p><input id="firmware" type="file" accept=".bin"><p><button id="upgrade" type="button">UPLOAD FIRMWARE</button></p><progress id="progress" max="100" value="0"></progress></section>
+<section><h2>03 / FIRMWARE</h2><p>Update on the device: SETTINGS &gt; DEVICE &gt; Firmware update &gt; Check / install latest. The device checks, downloads, verifies and installs the published firmware, then restarts. Keep power connected.</p></section>
 <section><h2>04 / NETWORK</h2><p>Save up to 8 networks. Connect your phone to the device setup hotspot to scan nearby Wi-Fi and check the password before saving. Your other saved networks are kept.</p><div id="saved-networks"></div><button id="wifi-setup" type="button">CONNECT ANOTHER NETWORK</button><p>The device will display a JOIN HOTSPOT QR code. Scan it with your phone camera and join mic-on. The setup page should open; if it does not, use the second code shown automatically on the device.</p></section><p id="notice" role="status"></p>
-<script src="/ota.js"></script>
 <script>
-let nonce='', lastInfo=null, otaBusy=false, otaPending=null, otaChecking=false;
-try{otaPending=JSON.parse(sessionStorage.getItem('mic-on-ota')||'null')}catch(e){}
+let nonce='';
  const $=id=>document.getElementById(id); const note=s=>$('notice').textContent=s;
 function labels(){$('volText').textContent=$('volume').value;$('brightText').textContent=$('brightness').value+'%'}
-async function info(fill=false){try{const r=await fetch('/api/info',{cache:'no-store'});if(!r.ok)throw Error('Connection failed');const p=await r.json();nonce=p.nonce;lastInfo=p;$('update-window').textContent=p.update_seconds>0?'Upload window: '+p.update_seconds+' seconds remaining.':'Use DEVICE > Firmware update on the device.';$('status').textContent=({'IDLE':'IDLE','LISTENING':'LISTENING','SPEAKING':'SPEAKING','CONNECTING':'CONNECTING','CONNECTING VOICE':'CONNECTING','UPDATING':'UPDATING','SETTINGS':'SETTINGS','NAVIGATION':'MENU','RECORDING':'RECORDING'}[p.state]||p.state)+' / BAT '+(p.battery<0?'--':p.battery+'%')+' · v'+p.version;if(fill){for(const k of ['volume','brightness','screen_seconds','idle_seconds','mode','voice','duplex'])$(k).value=p[k];labels();renderNetworks(p.wifi_networks);if(otaBusy||otaPending)lockUpdate(true)}}catch(e){$('status').textContent='Device offline. Connect your phone to the same Wi-Fi.'}}
+async function info(fill=false){try{const r=await fetch('/api/info',{cache:'no-store'});if(!r.ok)throw Error('Connection failed');const p=await r.json();nonce=p.nonce;$('status').textContent=({'IDLE':'IDLE','LISTENING':'LISTENING','SPEAKING':'SPEAKING','CONNECTING':'CONNECTING','CONNECTING VOICE':'CONNECTING','UPDATING':'UPDATING','SETTINGS':'SETTINGS','NAVIGATION':'MENU','RECORDING':'RECORDING'}[p.state]||p.state)+' / BAT '+(p.battery<0?'--':p.battery+'%')+' · v'+p.version;if(fill){for(const k of ['volume','brightness','screen_seconds','idle_seconds','mode','voice','duplex'])$(k).value=p[k];labels();renderNetworks(p.wifi_networks)}}catch(e){$('status').textContent='Device offline. Connect your phone to the same Wi-Fi.'}}
 async function post(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Device-Nonce':nonce},body:JSON.stringify(body)});const text=await r.text();if(!r.ok)throw Error(text);note(text)}
 $('volume').oninput=$('brightness').oninput=labels;
 $('prefs').onsubmit=async e=>{e.preventDefault();try{const p={};for(const k of ['volume','brightness','screen_seconds','idle_seconds','mode','voice','duplex'])p[k]=Number($(k).value);await post('/api/settings',p)}catch(e){note(e.message)}};
 function renderNetworks(names){const box=$('saved-networks');box.replaceChildren();if(!Array.isArray(names)){box.textContent='Could not load saved networks.';return}for(const name of names){const row=document.createElement('p'),label=document.createElement('span'),button=document.createElement('button');label.textContent=name;button.type='button';button.textContent='FORGET';button.onclick=async()=>{if(!confirm('Forget '+name+' and restart the device?'))return;try{await post('/api/wifi',{forget:name})}catch(e){note(e.message)}};row.append(label,button);box.append(row)}}
-$('wifi-setup').onclick=async()=>{if(otaBusy||otaPending)return;if(!confirm('Restart into Wi-Fi setup? Then scan the device hotspot code.'))return;try{await post('/api/wifi/setup',{});$('wifi-setup').disabled=true}catch(e){note(e.message)}};
-function storePending(){try{if(otaPending)sessionStorage.setItem('mic-on-ota',JSON.stringify(otaPending));else sessionStorage.removeItem('mic-on-ota')}catch(e){}}
-function lockUpdate(locked){for(const id of ['upgrade','firmware','wifi-setup'])$(id).disabled=locked;for(const b of document.querySelectorAll('#prefs button,#saved-networks button'))b.disabled=locked}
-async function verifyUpdate(){
- if(otaChecking||!otaPending)return;otaChecking=true;
- try{
-  const r=await fetch('/api/info',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error();const p=await r.json();
-  const result=MicOnOTA.verify(otaPending,p);
-  if(result==='confirmed'){note('UPDATE CONFIRMED · v'+p.version+' is running and boot validation passed.');otaPending=null;storePending();lockUpdate(false);info(true);return}
-  if(result==='wrong_device'){note('Waiting for the original device. This address does not identify the expected device.');}
-  if(result==='different'){note('Update not confirmed: device restarted with a different firmware (v'+p.version+'). It may have rolled back.');otaPending=null;storePending();lockUpdate(false);info(true);return}
- }catch(e){}
- finally{otaChecking=false}
- if(otaPending&&Date.now()-otaPending.started>180000){note('Could not confirm the update. Reconnect to the same Wi-Fi and reload this page to check again. Do not assume upload progress means success.');lockUpdate(false);return}
- if(otaPending)setTimeout(verifyUpdate,1500);
-}
-$('upgrade').onclick=async()=>{
- if(otaBusy)return;
- const file=$('firmware').files[0];if(!file){note('Select passport-gpt-live.bin first.');return}
- try{
-  if(!lastInfo?.boot_id||!lastInfo?.device_id)throw Error('Refresh device information before updating.');
-  const expected=MicOnOTA.descriptor(await file.slice(0,288).arrayBuffer());
-  if(!confirm('Install v'+expected.version+' and restart? Keep power connected.'))return;
-  otaBusy=true;lockUpdate(true);otaPending={...expected,boot_id:lastInfo.boot_id,device_id:lastInfo.device_id,started:Date.now()};storePending();
-  const x=new XMLHttpRequest();x.open('POST','/api/update');x.setRequestHeader('Content-Type','application/octet-stream');x.setRequestHeader('X-Device-Nonce',nonce);x.timeout=180000;
-  x.upload.onprogress=e=>{if(e.lengthComputable)$('progress').value=e.loaded/e.total*100};
-  x.onload=()=>{otaBusy=false;if(x.status<200||x.status>=300){note(x.responseText);otaPending=null;storePending();lockUpdate(false);return}otaPending.started=Date.now();storePending();note('Firmware uploaded. Waiting for restart and boot confirmation…');verifyUpdate()};
-  x.onerror=x.ontimeout=()=>{otaBusy=false;note('Upload connection interrupted. Checking whether the device restarted…');verifyUpdate()};
-  note('Uploading. Keep power connected.');x.send(file);
- }catch(e){otaBusy=false;otaPending=null;storePending();lockUpdate(false);note(e.message)}
-};
-if(otaPending){otaPending.started=Date.now();storePending();lockUpdate(true);note('Checking the last update…');verifyUpdate()}
-info(true);setInterval(()=>{if(!otaBusy&&!otaPending)info()},10000);
+$('wifi-setup').onclick=async()=>{if(!confirm('Restart into Wi-Fi setup? Then scan the device hotspot code.'))return;try{await post('/api/wifi/setup',{});$('wifi-setup').disabled=true}catch(e){note(e.message)}};
+info(true);setInterval(()=>info(),10000);
 </script></html>

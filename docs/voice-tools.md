@@ -1,6 +1,6 @@
 # 语音工具与文件上下文
 
-这条实现沿用已验证的 Codex CLI 0.159.2、ChatGPT 订阅登录、GPT-Live v3 和 WebRTC 媒体桥。没有接入新的搜索服务、计算 API、时钟 API 或外部应用。
+实现使用 ChatGPT 订阅登录、Codex app-server、GPT-Live v3 和 WebRTC 媒体桥；当前部署记录为 Codex CLI 0.162.1。没有接入新的搜索服务、计算 API、时钟 API 或外部应用。
 
 ## 执行路径
 
@@ -33,36 +33,14 @@ LIVE 中的简单请求沿用原生后台执行。语音提示规则要求等待
 
 app-server 使用命名权限配置 `mic-on`：`:minimal` 只读、`:workspace_roots` 可写、工作目录下 `.codex` 只读、命令网络关闭。命令环境只提供工具搜索路径和时区，不继承设备令牌等服务变量。托管 web search 独立于命令网络权限。服务器 Codex 自己仍使用现有订阅登录进行模型与搜索请求。
 
-使用 wrapper/npm 安装 Codex 时，其沙箱执行程序可能位于系统运行目录之外，需设置 `VOICE_CODEX_RUNTIME_DIR` 为实际 Codex 安装目录。当前服务器为 `/home/lake/.local/share/codex-cli`，只额外授予该安装目录读取权限。遗漏此配置时，语音和搜索可能仍可工作，但本机命令会报 `bwrap: execvp ... codex: No such file or directory`。`thread/start` 必须保留默认本机环境；显式传 `environments: []` 会移除命令工具。
+使用 wrapper/npm 安装 Codex 时，其沙箱执行程序可能位于系统运行目录之外，需设置 `VOICE_CODEX_RUNTIME_DIR` 为实际 Codex 安装目录。当前服务器记录为 `/home/lake/.nvm/versions/node/v24.15.0`，只额外授予该安装目录读取权限。遗漏此配置时，语音和搜索可能仍可工作，但本机命令会报 `bwrap: execvp ... codex: No such file or directory`。`thread/start` 必须保留默认本机环境；显式传 `environments: []` 会移除命令工具。
 
 工具请求增加后台推理与工具等待时间，使用同一个订阅的额度。音频流继续运行；工具完成不等于扬声器已播完。原有 VOICE 发送控制、LIVE 收音、停止播放和音色逻辑继续由现有链路处理。
 
 `RUST_LOG=passport_voice=info` 记录 `voice backend tool`，只含工具类型及开始/完成事件，不记录用户查询、执行命令、文件内容或工具结果。原生工具能力及权限配置仍依赖实验性 app-server 版本，应在升级 Codex 时复验。
 
-## 验证
+## 验证边界
 
-离线：`cargo test --locked` 覆盖摘要跨会话保留、删除、超限、编码和符号链接；`scripts/test_session.py` 验证原生工具配置、稳定工作目录、自动 handoff 设置及新会话摘要注入，并保留音频控制回归。
+Rust 上下文单元测试与 scripts/test_session.py 的本地替身回归保留。实际语音委派、保存称呼、跨会话读取、整理笔记、忘记指定内容和普通闲聊不保存仍需设备验收；提示词规则不等于行为已通过。
 
-2026-10-10 已完成：29 个 Rust 测试、Clippy 严格检查及完整离线会话回归通过。服务器 Codex 0.159.2 的独立原生工具测试实际执行 `date`、Python `Decimal`、文件写入和读回，并通过托管搜索找到 Python 官方 Decimal 文档。
-
-独立 WebRTC 测试实例中，以本机合成的中文测试语音走设备协议，成功触发后台命令并保存 `123.45 × 6.7 = 827.115`。随后结束会话、创建新会话询问上次记录，收到助手转写：“找到了，上次的语音工具测试计算结果是：123.45 乘以 6.7 等于 827.115，是精确值，没有舍入。”测试目录与生产上下文分开，记录位于本地 Git 忽略的 `artifacts/tools-check/`。这验证语音到工具再到语音的链路，不替代真实设备麦克风、扬声器和网络环境的听感验收。
-
-2026-10-10 11:25（上海时间）已更新现有服务器服务，保留同一工作区已完成的 0.9.1 音频修复。部署前确认设备在 NAVIGATION；部署后服务为 active，`/health` 返回设备已连接、协议 8、版本 0.9.1，安装二进制与测试构建 SHA-256 一致。生产上下文目录为 `/home/lake/workspaces/esp32-gpt-live/data/context`，没有带入测试记录。工具功能无需重新烧录设备；新建会话使用新配置。
-
-真实环境验收应分别检查原生 Codex 工具执行，以及 GPT-Live 语音触发委派并播报结果。离线通过不能替代真实语音验收。可说：
-
-1. “现在上海几点？帮我算 123.45 乘以 6.7。”
-2. “记住一个测试：我的项目叫 mic-on。”
-3. 重置对话后问：“我之前让你记住的项目叫什么？”
-4. “忘掉刚才的测试记录。”再次重置，确认不再读入。
-5. “上网查找 Python 官方 Decimal 文档，告诉我来源。”
-
-文档记忆的真实语音验收还应覆盖以下场景；提示词规则不等于这些行为已经通过实机验证：
-
-1. 约定一组测试称呼，重置聊天后核对双方称呼，再修改其中一个并再次核对。
-2. 讨论一段内容后要求整理为笔记，检查实际正文和 `CONTEXT.md` 索引；追加新内容后确认没有重复文件。
-3. 新增一个测试待办，查询、标记完成，确认勾选状态正确且没有声称设置提醒。
-4. 忘掉测试记录，检查相关文件和索引；新会话确认不再引用，同时其他内容仍在。
-5. 普通闲聊或提出一个假设，确认没有自动归档转写或生成长期记忆。
-
-官方依据：[Codex 联网搜索](https://learn.chatgpt.com/docs/web-search)、[Codex 权限配置](https://learn.chatgpt.com/docs/permissions)、[GPT-Live 委派与工具](https://developers.openai.com/api/docs/guides/live-delegation)。公开 GPT-Live API 与 Codex 订阅通道的参数不同；此实现使用 app-server 自带委派。
+测试和当前状态分别见 [testing.md](testing.md) 与 [status.md](status.md)。

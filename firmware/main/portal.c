@@ -9,18 +9,15 @@
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
-#include "esp_app_format.h"
 #include "esp_random.h"
 #include "esp_mac.h"
 #include "esp_system.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-static atomic_int armed_until;
 static atomic_bool updating;
 static char nonce[33];
 extern const char page_start[] asm("_binary_settings_html_start");
@@ -57,14 +54,6 @@ static esp_err_t root(httpd_req_t *r)
                        "frame-ancestors 'none'");
     return httpd_resp_send(r, page_start, page_end - page_start - 1);
 }
-static esp_err_t ota_script(httpd_req_t *r)
-{
-    extern const char start[] asm("_binary_ota_js_start");
-    extern const char end[] asm("_binary_ota_js_end");
-    httpd_resp_set_type(r, "text/javascript");
-    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
-    return httpd_resp_send(r, start, end - start - 1);
-}
 static void image_id(const esp_app_desc_t *description, char output[65])
 {
     for (unsigned i = 0; i < 32; i++) snprintf(output + i * 2, 3, "%02x", description->app_elf_sha256[i]);
@@ -88,8 +77,6 @@ static esp_err_t info(httpd_req_t *r)
     cJSON_AddStringToObject(j, "ota_state", ota_result != ESP_OK ? "unknown" :
         ota_state == ESP_OTA_IMG_VALID ? "valid" :
         ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "pending_verify" : "unconfirmed");
-    int remaining = atomic_load(&armed_until) - esp_timer_get_time() / 1000000;
-    cJSON_AddNumberToObject(j, "update_seconds", remaining > 0 ? remaining : 0);
     cJSON_AddStringToObject(j, "state", device_state());
     cJSON_AddStringToObject(j, "version", esp_app_get_description()->version);
     cJSON_AddNumberToObject(j, "battery", device_battery());
@@ -218,120 +205,26 @@ static esp_err_t wifi(httpd_req_t *r)
         cJSON_Delete(j);
         return error(r, "409 Conflict", "Use CONNECT ANOTHER NETWORK to scan and verify before saving.");
     }
+    if (!portal_update_lock()) {
+        cJSON_Delete(j);
+        return error(r, "409 Conflict", "An update or restart is already in progress.");
+    }
     esp_err_t e = wifi_profiles_forget(forget->valuestring);
     cJSON_Delete(j);
-    if (e != ESP_OK)
+    if (e != ESP_OK) {
+        portal_update_unlock();
         return error(r, "400 Bad Request", e == ESP_ERR_NO_MEM
                      ? "8 networks saved. Forget one first."
                      : "Could not save Wi-Fi. Check your input.");
-    if (!portal_update_lock())
-        return error(r, "409 Conflict", "An update or restart is already in progress.");
-    ui_show_guide();
+    }
+    ui_show_network();
     ui_set("WI-FI SAVED", "Restarting device");
-    error(r, "200 OK", removing ? "Network forgotten. Restarting device."
-                               : "Wi-Fi saved; other networks kept. Restarting device.");
-    xTaskCreate(restart, "restart", 2048, NULL, 4, NULL);
-    return ESP_OK;
-}
-static esp_err_t update(httpd_req_t *r)
-{
-    if (!authorized(r))
-        return error(r, "403 Forbidden", "Refresh this page and retry.");
-    if (portal_updating())
-        return error(r, "409 Conflict", "An update or restart is already in progress.");
-    if (esp_timer_get_time() / 1000000 >= atomic_load(&armed_until))
-        return error(r, "403 Forbidden", "Use Device > Firmware update on the device.");
-    if (!portal_update_lock())
-        return error(r, "409 Conflict", "An update or restart is already in progress.");
-    if (device_busy()) {
-        atomic_store(&updating, false);
-        return error(r, "409 Conflict", "End the conversation and wait for any update to finish.");
-    }
-    const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
-    if (!slot || r->content_len < 1024 || r->content_len > slot->size) {
-        atomic_store(&updating, false);
-        return error(r, "400 Bad Request", "Invalid firmware size.");
-    }
-    char buffer[1024];
-    const size_t prefix_size =
-        sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
-    int total = 0;
-    while (total < prefix_size) {
-        int n = httpd_req_recv(r, buffer + total, prefix_size - total);
-        if (n <= 0) {
-            atomic_store(&updating, false);
-            return error(r, "400 Bad Request", "Upload interrupted. Current firmware is unchanged.");
-        }
-        total += n;
-    }
-    esp_app_desc_t description;
-    memcpy(&description, buffer + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t),
-           sizeof(description));
-    if ((uint8_t)buffer[0] != ESP_IMAGE_HEADER_MAGIC ||
-        description.magic_word != ESP_APP_DESC_MAGIC_WORD ||
-        strncmp(description.project_name, "passport-gpt-live", sizeof(description.project_name)) !=
-            0) {
-        atomic_store(&updating, false);
-        return error(r, "400 Bad Request", "Select the passport-gpt-live.bin application image for this device.");
-    }
-    esp_ota_handle_t handle;
-    esp_err_t e = esp_ota_begin(slot, OTA_WITH_SEQUENTIAL_WRITES, &handle);
-    if (e != ESP_OK) {
-        atomic_store(&updating, false);
-        return error(r, "500 Internal Server Error", "Could not prepare update. Restart the device and retry.");
-    }
-    ui_wake();
-    ui_show_guide();
-    ui_set("UPDATING", "Keep power connected");
-    e = esp_ota_write(handle, buffer, total);
-    int last_percent = -10;
-    while (e == ESP_OK && total < r->content_len) {
-        int remaining = r->content_len - total;
-        int n = httpd_req_recv(r, buffer, remaining > sizeof(buffer) ? sizeof(buffer) : remaining);
-        if (n <= 0) {
-            e = ESP_FAIL;
-            break;
-        }
-        e = esp_ota_write(handle, buffer, n);
-        if (e != ESP_OK)
-            break;
-        total += n;
-        int percent = total * 100 / r->content_len;
-        if (percent / 10 != last_percent / 10) {
-            char detail[64];
-            snprintf(detail, sizeof(detail), "Uploaded %d%%\nKeep power connected", percent);
-            ui_set("UPDATING", detail);
-            last_percent = percent;
-        }
-    }
-    if (e == ESP_OK)
-        e = esp_ota_end(handle);
-    else
-        esp_ota_abort(handle);
-    if (e == ESP_OK)
-        e = esp_ota_set_boot_partition(slot);
-    if (e != ESP_OK) {
-        atomic_store(&updating, false);
-        ui_set("UPDATE FAILED", "Firmware unchanged\nRetry the update");
-        return error(r, "400 Bad Request", "Upload or validation failed. Current firmware is unchanged.");
-    }
-    atomic_store(&armed_until, 0);
-    ui_set("FIRMWARE SAVED", "Restarting to verify");
-    char identity[65]; image_id(&description, identity);
-    cJSON *result = cJSON_CreateObject();
-    // Fixed-size metadata fields in uploaded images are not trusted C strings.
-    char version[33]; memcpy(version, description.version, 32); version[32] = 0;
-    cJSON_AddStringToObject(result, "version", version);
-    cJSON_AddStringToObject(result, "image_id", identity);
-    cJSON_AddStringToObject(result, "state", "restarting");
-    char *body = cJSON_PrintUnformatted(result); cJSON_Delete(result);
     if (xTaskCreate(restart, "restart", 2048, NULL, 4, NULL) != pdPASS) {
-        free(body);
-        return error(r, "500 Internal Server Error", "Firmware saved. Restart the device manually to finish verification.");
+        portal_update_unlock();
+        ui_set("NETWORK FORGOTTEN", "Restart device manually");
+        return error(r, "500 Internal Server Error", "Network forgotten, but restart unavailable. Restart the device manually.");
     }
-    httpd_resp_set_type(r, "application/json");
-    httpd_resp_sendstr(r, body ? body : "{}"); free(body);
-    return ESP_OK;
+    return error(r, "200 OK", "Network forgotten. Restarting device.");
 }
 esp_err_t portal_start(void)
 {
@@ -349,13 +242,11 @@ esp_err_t portal_start(void)
         return e;
     const httpd_uri_t routes[] = {
         {.uri = "/", .method = HTTP_GET, .handler = root},
-        {.uri = "/ota.js", .method = HTTP_GET, .handler = ota_script},
         {.uri = "/api/wifi/setup", .method = HTTP_POST, .handler = wifi_setup},
         {.uri = "/api/info", .method = HTTP_GET, .handler = info},
         {.uri = "/api/settings", .method = HTTP_POST, .handler = save},
         {.uri = "/api/netcheck", .method = HTTP_POST, .handler = netcheck},
-        {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi},
-        {.uri = "/api/update", .method = HTTP_POST, .handler = update}};
+        {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi}};
     for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         e = httpd_register_uri_handler(server, &routes[i]);
         if (e != ESP_OK) {

@@ -827,7 +827,8 @@ static void command_task(void *unused)
             } else if (action == MENU_WIFI) {
                 stop_session();
                 atomic_store(&menu_active, false);
-                ui_show_guide();
+                ui_show_network();
+                ui_set("OPENING WI-FI SETUP", "Please wait");
                 if (voice_wifi_request_setup() != ESP_OK)
                     ui_set("SETUP UNAVAILABLE", "Restart and retry");
             } else if (action == MENU_UPDATE) {

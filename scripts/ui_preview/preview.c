@@ -165,7 +165,7 @@ static void navigation_cycle(int selected)
 {
     ui_show_guide();
     menu_open(selected);
-    ui_show_settings("http://192.0.2.1/");
+    ui_show_setup("mic-on-FFFF", true);
     lv_refr_now(NULL);
     assert(lv_qrcode_is_render_valid(qr));
     ui_show_home(selected);
@@ -242,7 +242,7 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--update-only")) {
         ui_show_update();
         capture("update-checking");
-        ui_set("DOWNLOADING UPDATE", "v0.10.8 / 45%\nKeep power connected");
+        ui_set("DOWNLOADING UPDATE", "New version / 45%\nKeep power connected");
         capture("update-downloading");
         ui_set("UP TO DATE", "Latest version installed\nOK: back");
         capture("update-current");
@@ -358,15 +358,18 @@ int main(int argc, char **argv)
         menu_key(1);
     menu_key(0);
     capture("reset-context");
+    ui_show_network();
+    ui_set("WI-FI CONNECTED", "Finish on your phone");
+    capture("wifi-connected");
+    ui_set("WI-FI NOT CONNECTED", "Check phone and retry");
+    capture("wifi-failed");
     ui_show_setup("mic-on-FFFF", false);
     capture("qr-hotspot");
     ui_show_setup("mic-on-FFFF", true);
     capture("qr-setup");
-    ui_show_settings("http://192.168.7.17/");
-    capture("qr-settings");
     ui_set("SPEAKING", "Hold OK: home");
     capture("qr-network-event");
-    assert(!strcmp(lv_label_get_text(status_label), "OPEN SETTINGS"));
+    assert(!strcmp(lv_label_get_text(status_label), "02 / SET UP WI-FI"));
     ui_mode(false);
     ui_show_guide();
     ui_battery(9, 0);

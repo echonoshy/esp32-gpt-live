@@ -155,7 +155,7 @@ static void connect_task(void *arg)
     }
     _lock_release(&state_lock);
     memset(p, 0, sizeof(*p)); free(p);
-    ui_show_guide();
+    ui_show_network();
     ui_set(e == ESP_OK ? "WI-FI CONNECTED" : "WI-FI NOT CONNECTED",
            e == ESP_OK ? "Finish on your phone" : "Check phone and retry");
     voice_wifi_radio_give();

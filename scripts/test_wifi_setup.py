@@ -29,7 +29,7 @@ static esp_err_t wifi_profiles_save_fake(const char*s,const char*p){assert(test_
 #define wifi_profiles_save wifi_profiles_save_fake
 static void esp_wifi_disconnect(void){disconnects++;}
 static void voice_wifi_ip(char*p,size_t n){snprintf(p,n,"192.168.1.15");}
-static void ui_show_guide(void){}
+static void ui_show_network(void){}
 static void ui_set(const char*a,const char*b){(void)a;(void)b;}
 static void voice_wifi_radio_give(void){released++;}
 static void vTaskDelete(void*p){(void)p;longjmp(done,1);}
@@ -59,3 +59,53 @@ with tempfile.TemporaryDirectory() as td:
  p=Path(td);(p/'test.c').write_text(harness)
  subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(root/'scripts/fixtures/wifi'),'-I'+str(root/'firmware/main'),str(p/'test.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
+
+# Run the production network-forget handler: failed restarts must release maintenance
+# ownership, and a concurrent firmware update must prevent NVS changes.
+portal=(root/'firmware/main/portal.c').read_text()
+forget=portal[portal.index('static esp_err_t wifi(httpd_req_t *r)'):portal.index('esp_err_t portal_start(void)')]
+forget_harness=r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include "esp_err.h"
+typedef struct { int unused; } httpd_req_t;
+typedef struct { const char *valuestring; } cJSON;
+static cJSON item={"test-network"};
+static bool locked, lock_available=true, authenticated=true;
+static int save_result, spawn_result=1, saved, spawned;
+static char response[160], status[32];
+static bool authorized(httpd_req_t *r){(void)r;return authenticated;}
+static bool device_busy(void){return false;}
+static bool portal_updating(void){return false;}
+static bool portal_update_lock(void){if(!lock_available||locked)return false;locked=true;return true;}
+static void portal_update_unlock(void){locked=false;}
+static cJSON *read_json(httpd_req_t *r){(void)r;return &item;}
+static cJSON *cJSON_GetObjectItem(cJSON *j,const char *key){(void)key;return j;}
+static bool cJSON_IsString(cJSON *j){return j&&j->valuestring;}
+static void cJSON_Delete(cJSON *j){(void)j;}
+static int wifi_profiles_forget(const char *name){assert(locked);assert(!strcmp(name,"test-network"));saved++;return save_result;}
+static int error(httpd_req_t *r,const char *code,const char *message){(void)r;snprintf(status,sizeof(status),"%s",code);snprintf(response,sizeof(response),"%s",message);return ESP_OK;}
+static void ui_show_network(void){}
+static void ui_set(const char *a,const char *b){(void)a;(void)b;}
+static void restart(void *p){(void)p;}
+#define pdPASS 1
+static int xTaskCreate(void (*fn)(void *),const char *name,int stack,void *arg,int priority,void *handle){(void)fn;(void)name;(void)stack;(void)arg;(void)priority;(void)handle;assert(locked);spawned++;return spawn_result;}
+'''+forget+r'''
+static void run(int persist,int spawn,bool can_lock){
+ locked=false;lock_available=can_lock;save_result=persist;spawn_result=spawn;saved=spawned=0;
+ httpd_req_t request={0};assert(wifi(&request)==ESP_OK);
+}
+int main(void){
+ run(ESP_OK,pdPASS,false);assert(!saved&&!spawned&&!locked&&!strncmp(status,"409",3));
+ run(ESP_FAIL,pdPASS,true);assert(saved==1&&!spawned&&!locked&&!strncmp(status,"400",3));
+ run(ESP_OK,0,true);assert(saved==1&&spawned==1&&!locked&&!strncmp(status,"500",3)&&strstr(response,"manually"));
+ run(ESP_OK,pdPASS,true);assert(saved==1&&spawned==1&&locked&&!strncmp(status,"200",3));
+ puts("PASS: network deletion waits for maintenance ownership; save/restart failures release lock; restart failure requests manual recovery");
+}
+'''
+with tempfile.TemporaryDirectory() as td:
+ p=Path(td);(p/'forget.c').write_text(forget_harness)
+ subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(root/'scripts/fixtures/wifi'),str(p/'forget.c'),'-o',str(p/'forget')],check=True)
+ subprocess.run([str(p/'forget')],check=True)

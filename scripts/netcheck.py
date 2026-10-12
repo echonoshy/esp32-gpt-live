@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument('--url', default='http://192.168.7.17')
+p.add_argument('--url', required=True, help='Current device LAN URL, such as http://192.168.7.66')
 p.add_argument('--out', default='artifacts/diagnostics/netcheck.json')
 a = p.parse_args()
 
