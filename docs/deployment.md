@@ -2,7 +2,7 @@
 
 ## 当前服务器
 
-以下是 2026-10-12 已记录的部署配置；本轮源码 review 不连接设备或重启服务。
+以下是 2026-10-12 的部署配置；本轮固件发布只更新签名镜像与版本清单，不操作设备或重启服务。
 
 | 项目 | 配置 |
 | --- | --- |
@@ -16,7 +16,7 @@
 | Codex 运行授权目录 | /home/lake/.nvm/versions/node/v24.15.0 |
 | Chromium 启动脚本 | /home/lake/workspaces/mic-on/chrome-launch |
 | 上下文 / 时区 | /home/lake/workspaces/mic-on/context / Asia/Shanghai |
-| 签名固件目录 | /home/lake/workspaces/mic-on/data/firmware |
+| 签名固件目录 | /home/lake/workspaces/mic-on/data/firmware；已发布 0.10.10 |
 
 环境示例为 .env.example。DEVICE_TOKEN 必须与设备私有配置一致；令牌、登录凭据与上下文数据不提交 Git。FIRMWARE_DIR 默认是工作目录下的 data/firmware。
 
