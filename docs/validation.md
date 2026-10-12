@@ -197,3 +197,26 @@ ADC 组合键电压窗口由电路标称值推导，编译和离线输入序列�
 - USB 读取 OTA 元数据并验证 CRC，确认当前槽 `ota_0`，备份该槽后仅写 `0x10000` 应用镜像；esptool 哈希校验通过，未写分区表和 NVS。
 - 真机 `/api/info` 返回 **0.10.0**，原 Wi-Fi 自动加载。通过 USB 添加一个不存在的临时网络后重启，串口依次记录 `Trying saved network 1/2` 与 `2/2`；设备自动连回原 Wi-Fi，HTTP 确认两条网络均保留。随后调用删除接口移除临时网络并再次重启，确认只保留原网络；音量、亮度、熄屏时间、空闲时间、模式、音色和双工设置与升级前一致，分配失败计数为 0。
 - 家里、公司和手机热点之间的实际移动切换、路由器密码错误、所有网络同时消失后再恢复仍待现场验证。本次没有发起 GPT 语音或播放测试音；Wi-Fi 连接与语音服务器连接是独立验证项。
+
+
+## 0.10.4 源码配置与新服务器对齐（2026-10-12）
+
+- 以 `140.143.229.103` 的 `/home/lake/workspaces/mic-on` 部署为准，逐文件比较服务端及依赖锁文件，只有 `server/src/main.rs`、`server/src/codex.rs` 存在差异。已同步线上并行准备 Chromium SDP 与 Codex 会话的实现及启动阶段耗时日志；其余服务端源码相同。
+- 本地实际固件配置、配置示例与 `probe_voice.py` 默认地址已更新为 `ws://140.143.229.103:8787/device`。通过新服务器运行进程核对设备令牌，确认与原本地令牌一致；未在记录中保存令牌。服务模板更名为 `scripts/mic-on-voice.service`，环境变量示例和 README 已更新。详情见 [当前部署说明](deployment.md)。
+- 固件源码版本从 `0.10.3` 调整为 `0.10.4`，仅涉及服务器地址和版本标识；服务端版本仍与线上一致，为 `0.9.2`，音频协议为 `8`。
+- `cargo test --locked`：29 项通过；`cargo clippy --all-targets --locked -- -D warnings`、`cargo build --locked` 通过。`scripts/test_worklet.cjs`、`scripts/test_voice_setup.cjs` 通过。
+- `.tools/python/bin/python scripts/test_session.py` 全离线进程回归通过，覆盖启动收音与提前发送、协议 7/8 合包与尾帧顺序、旧协议兼容、VOICE/LIVE 切换、音色新会话、暂停/恢复、取消、LIVE 积压处理与静音 probe 不建立上游会话。未连接真实模型，不代表真实网络性能验收。
+- 从 Mac 访问新服务器 `/health` 成功，检查时 `device_connected=true`；线上服务未重启、未重新部署。旧服务没有操作。
+- 首次分析阶段尚未安装 ESP-IDF，未构建或烧录 `0.10.4`。历史设备地址 `192.168.7.21` 与 `192.168.7.17` 均未能读回版本。后续安装、构建与实机结果见下一节。
+
+## 0.10.4 本机编译、刷写与新服务器验收（2026-10-12）
+
+- 按后续明确请求安装本机编译环境：项目 `.tools/esp-idf` 为官方 `v5.5.3`（`2c211b236707889e8400c4dc5644dd5c4ee071e0`），子模块全部对齐且工作树干净；`.tools/espressif` 包含 ESP32-C3 工具链，GCC `14.2.0`（`esp-14.2.0_20251107`），Python 为 uv 管理的 `3.13.12`。安装 CMake、Ninja 和 dfu-util；重建步骤见 [部署说明](deployment.md)。
+- USB `/dev/cu.usbmodem11101` 确认 ESP32-C3、8 MB Flash。刷前完整读取 8 MB Flash 备份，分区表与新构建逐字节一致；OTA 元数据为 sequence 1、state 2、CRC 有效，启动槽 `ota_0` 位于 `0x10000`。
+- 刷前镜像已经标为 `0.10.4`，内嵌目标地址也是 `140.143.229.103`。通过 USB MAC 与本机 ARP 对应找到设备地址 `192.168.7.66`，HTTP 也读到 `0.10.4`。本次按本地同步后的源码重新构建、刷写同版本号镜像，不能仅凭版本号证明更新。
+- `idf.py -C firmware build` 完成全部构建，镜像 **1,613,456 B**，应用槽剩余 **56%**；镜像元数据为项目 `passport-gpt-live`、版本 `0.10.4`、ESP-IDF `v5.5.3`，内嵌设备地址仅有 `ws://140.143.229.103:8787/device`。SHA-256：`650550aec83159efb9ce7ded3eaf2472924d27f134bbc61accb2821d3e9c7872`。
+- 仅向 `0x10000` 写入应用镜像，esptool 写入哈希验证通过；再次读回全部 1,613,456 字节，与构建产物逐字节一致。没有写入 bootloader、分区表、OTA 数据或 NVS。完整备份、私有镜像与读回镜像均留在被 Git 忽略的 `artifacts/firmware-0.10.4/`，不上传 GitHub。
+- 刷后 HTTP 读回 `0.10.4`；音量 90、亮度 65、熄屏 600 秒、空闲 180 秒、音色 Breeze、模式与双工设置均保留。刷写和读回重启后，新服务器上残留的连接槽直到心跳超时才释放，期间设备有 4 次 WS 连接错误。14:24:22（上海时间）新服务器日志记录设备重新接入，之后返回 NAVIGATION。
+- 静音双向传输验证：设备新增上传 **636 帧**、播放 **600 帧**；服务器 probe 统计窗口记录收到 632 帧、发送 600 帧。测试窗口内新增发送错误、WS/Wi-Fi 断连、分配失败、播放丢帧/欠载、采集丢弃/溢出全部为 **0**，最大发送耗时 4 ms。服务器日志确认 probe 完成，`/health` 返回 `device_connected=true`。
+- 发送器与采集队列主机回归 `scripts/test_ws_send.py`、`scripts/test_capture_transport.py` 通过。本机默认 SDK 与 Xcode 链接器版本不匹配，测试时将 `SDKROOT` 显式设为 `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk` 后通过；没有修改测试或固件逻辑。此前服务端 29 项单测、Clippy、构建与完整离线会话回归通过，本次未再修改服务端逻辑。
+- 最终设备为 **NAVIGATION**、麦克风上传关闭，新服务器进程保持原 PID，没有重启或重新部署服务；旧服务器没有操作。验证涵盖构建、烧录、读回、设置保留和真实设备到目标服务器的双向传输；没有进行真实 GPT 问答、听感或自然插话验收。

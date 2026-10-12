@@ -71,7 +71,7 @@ async def probe(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("wav")
-    parser.add_argument("--url", default="ws://101.47.177.37:8787/device")
+    parser.add_argument("--url", default="ws://140.143.229.103:8787/device")
     parser.add_argument("--env", default=".env")
     parser.add_argument("--out", required=True)
     parser.add_argument("--wait", type=float, default=20)

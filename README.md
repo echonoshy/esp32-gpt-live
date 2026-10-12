@@ -19,7 +19,7 @@ GPT-Live
 
 服务端业务和会话管理使用 Rust。浏览器仅承担 WebRTC 编解码及音频时钟，没有 Python 服务端依赖。Python 脚本仅用于烧录、USB 配网和测试。
 
-这不是公开 GPT-Live API key 接入。使用的是 Codex 实验性 `thread/realtime/*`、v3、WebRTC 路径；目前在 Codex CLI 0.159.2 + ChatGPT Pro 上验证。需要保留 Codex 登录，后续版本和账户权限变化需要重新验证。语音消耗订阅用量，不代表无限量或零消耗。
+这不是公开 GPT-Live API key 接入。使用的是 Codex 实验性 `thread/realtime/*`、v3、WebRTC 路径；最初在 Codex CLI 0.159.2 + ChatGPT Pro 上验证；当前服务器安装 Codex CLI 0.162.1。需要保留 Codex 登录，后续版本和账户权限变化需要重新验证。语音消耗订阅用量，不代表无限量或零消耗。
 
 ## 使用
 
@@ -75,12 +75,13 @@ uv pip install --python .tools/python/bin/python pyserial esptool websockets
 
 ## 服务端
 
-需要 Rust 1.88+、已经通过 ChatGPT 登录的 Codex CLI，以及可运行的 Chromium。监听端口 8787。服务模板使用 `~/workspaces/mic-on`；现有部署仍位于 `/home/lake/workspaces/esp32-gpt-live`，复用时请按实际目录调整服务文件的 `WorkingDirectory`、`EnvironmentFile` 和 `ExecStart`。
+需要 Rust 1.88+、已经通过 ChatGPT 登录的 Codex CLI，以及可运行的 Chromium。监听端口 8787。当前服务器为 **140.143.229.103**，部署目录为 `/home/lake/workspaces/mic-on`，systemd 用户服务名为 `mic-on-voice.service`。固件连接 `ws://140.143.229.103:8787/device`。迁移差异、运行依赖和验证边界见 [当前部署说明](docs/deployment.md)。
 
 ```bash
 cargo build --release --locked
 cp .env.example .env
 # 填好个人设备令牌和本机可执行文件路径
+# 当前服务器的 Chromium 启动脚本见 docs/deployment.md
 set -a
 . ./.env
 set +a
@@ -93,11 +94,11 @@ set +a
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp scripts/passport-voice.service ~/.config/systemd/user/
+cp scripts/mic-on-voice.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now passport-voice.service
+systemctl --user enable --now mic-on-voice.service
 loginctl enable-linger "$USER"
-journalctl --user -u passport-voice.service -f
+journalctl --user -u mic-on-voice.service -f
 ```
 
 服务不自动保存日常音频或逐字转写。用户要求保存的上下文文件会保留在 `VOICE_CONTEXT_DIR`（默认 `data/context`），新会话读取 `CONTEXT.md`。设置 `RUST_LOG=passport_voice=info` 可记录连接、错误及工具活动类型，不记录查询、命令或文件内容；`.env`、设备令牌、上下文数据、测试录音与构建结果均不进入 Git。
@@ -115,6 +116,8 @@ journalctl --user -u passport-voice.service -f
 命令使用 Codex 的 `mic-on` 权限配置，只开放上下文工作目录读写及系统工具必需的读取路径；命令网络关闭，联网检索由 Codex 托管工具执行。应用、插件、MCP 和定时提醒未启用。详见 [工具实现与验证](docs/voice-tools.md)。
 
 ## 固件
+
+当前固件源码版本为 **0.10.4**，本次更新默认服务器地址；服务端版本为 **0.9.2**，音频协议为 **8**。固件版本来自 `firmware/CMakeLists.txt` 的 `PROJECT_VER`，设备实际版本通过其局域网 HTTP `/api/info` 的 `version` 查询；服务器 `/health` 的 `version` 只代表服务端。2026-10-12 已在本机编译并通过 USB 刷入，Flash 读回与构建镜像一致，设备确认 `0.10.4`，并完成新服务器的静音双向传输验证；见 [验证记录](docs/validation.md)。
 
 目标为 ESP32-C3、8 MB Flash、无 PSRAM 的 FoloToy AI Passport。ESP-IDF 固定为 **5.5.3**；Managed Components 的精确版本在 `firmware/dependencies.lock`。
 

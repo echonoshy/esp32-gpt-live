@@ -511,14 +511,29 @@ async fn run_session(
         .spawn()?;
     let mut codex: Option<codex::Codex> = None;
     let result=async {
-        let mut worker=tokio::time::timeout(Duration::from_secs(20),wait).await.context("Chromium startup timeout")??;
-        let offer=tokio::time::timeout(Duration::from_secs(15),worker.rx.recv()).await?.context("worker disconnected before offer")?;
-        let Message::Text(offer)=offer else {bail!("expected SDP offer")};
-        let offer:Value=serde_json::from_str(&offer)?;
-        let sdp=offer["sdp"].as_str().context("missing SDP offer")?;
-        codex=Some(codex::Codex::open().await?);
+        // These branches share no session state. Dropping either future on failure
+        // also drops its owned Codex child; the browser is cleaned up below.
+        let media = async {
+            let mut worker=tokio::time::timeout(Duration::from_secs(20),wait).await.context("Chromium startup timeout")??;
+            let offer=tokio::time::timeout(Duration::from_secs(15),worker.rx.recv()).await?.context("worker disconnected before offer")?;
+            let Message::Text(offer)=offer else {bail!("expected SDP offer")};
+            let offer:Value=serde_json::from_str(&offer)?;
+            let sdp=offer["sdp"].as_str().context("missing SDP offer")?.to_owned();
+            tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup media offer ready");
+            Ok::<_, anyhow::Error>((worker,sdp))
+        };
+        let backend = async {
+            let mut rpc=codex::Codex::open().await?;
+            tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup account ready");
+            rpc.prepare().await?;
+            tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup thread ready");
+            Ok::<_, anyhow::Error>(rpc)
+        };
+        let ((mut worker,sdp),rpc)=tokio::try_join!(media,backend)?;
+        codex=Some(rpc);
         let rpc=codex.as_mut().unwrap();
-        rpc.start(sdp, &prefs).await?;
+        rpc.start(&sdp, &prefs).await?;
+        tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup realtime accepted");
         let mut continuous=prefs.continuous;
         let fast=prefs.fast_ptt;
         let tagged=prefs.tagged;
