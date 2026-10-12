@@ -89,7 +89,7 @@ static atomic_bool recovering;
 static SemaphoreHandle_t send_lock;
 static atomic_bool connected, ready, recording, starting, wanted, awaiting_clear, end_pending,
     sticky_error;
-static atomic_bool boot_complete;
+static atomic_bool boot_complete, warmup_pending;
 static atomic_bool settings_open;
 static bool menu_notice;
 static atomic_bool interaction_active;
@@ -110,6 +110,7 @@ static atomic_uint wifi_disconnects, wifi_last_reason, ws_disconnects, ws_errors
 static atomic_uint playback_target, send_packets;
 static atomic_bool serial_trace;
 static atomic_uint mic_peak, output_peak;
+static atomic_uint speech_interruptions, speech_cleared_frames, speech_clear_at;
 static void wifi_diagnostic(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -218,6 +219,9 @@ void device_add_diagnostics(cJSON *root)
     cJSON_AddNumberToObject(j, "capture_overruns", atomic_load(&capture_overruns));
     cJSON_AddNumberToObject(j, "mic_peak", atomic_load(&mic_peak));
     cJSON_AddNumberToObject(j, "output_peak", atomic_load(&output_peak));
+    cJSON_AddNumberToObject(j, "speech_interruptions", atomic_load(&speech_interruptions));
+    cJSON_AddNumberToObject(j, "speech_cleared_frames", atomic_load(&speech_cleared_frames));
+    cJSON_AddNumberToObject(j, "speech_clear_at", atomic_load(&speech_clear_at));
     cJSON_AddNumberToObject(j, "ws_disconnects", atomic_load(&ws_disconnects));
     cJSON_AddNumberToObject(j, "ws_errors", atomic_load(&ws_errors));
     cJSON_AddNumberToObject(j, "button_mv", bsp_button_read_mv());
@@ -365,6 +369,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
         if (setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) != 0)
             ESP_LOGW(TAG, "TCP_NODELAY unavailable");
         atomic_store(&connected, true);
+        atomic_store(&warmup_pending, true);
         if (atomic_load(&wanted)) {
             atomic_store(&retry_at, now_ms() + 1500);
             ui_set("RECONNECTING", "Restoring audio");
@@ -511,6 +516,14 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
                        e == atomic_load(&epoch) && !atomic_load(&awaiting_clear)) {
                 atomic_store(&end_pending, true);
             } else if (!strcmp(type, "clear") && atomic_load(&wanted)) {
+                cJSON *reason = cJSON_GetObjectItem(m, "reason");
+                if (cJSON_IsString(reason) && !strcmp(reason->valuestring, "speech")) {
+                    unsigned queued = uxQueueMessagesWaiting(playback);
+                    atomic_fetch_add(&speech_interruptions, 1);
+                    atomic_fetch_add(&speech_cleared_frames, queued);
+                    atomic_store(&speech_clear_at, now_ms());
+                    ESP_LOGI(TAG, "speech clear epoch=%lu queued_ms=%u", (unsigned long)e, queued * 20);
+                }
                 mute();
                 atomic_store(&epoch, e);
                 atomic_store(&listen_after,
@@ -829,7 +842,11 @@ static void command_task(void *unused)
                     ui_show_menu("WEB SETUP", items, 2, 0, "OK / hold OK: back");
                 }
             }
-            continue;
+            // Selecting Voice is the first recording gesture, not a navigation-only press.
+            if (action == MENU_CHAT)
+                c.type = CMD_PTT_BEGIN;
+            else
+                continue;
         }
         if (c.type == CMD_OK) {
             if (atomic_load(&live_mode))
@@ -1125,6 +1142,8 @@ static void console_task(void *unused)
             enqueue(CMD_STOP, 0);
         else if (!strcmp(line, "voice"))
             enqueue(CMD_VOICE, 0);
+        else if (!strcmp(line, "ok"))
+            enqueue(CMD_OK, 0);
         else if (!strcmp(line, "record"))
             enqueue(CMD_PTT_BEGIN, 0);
         else if (!strcmp(line, "send"))
@@ -1149,6 +1168,11 @@ static void health_task(void *unused)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100));
         ticks++;
+        // Never send from the websocket callback: it may hold the transport lock.
+        if (atomic_load(&connected) && atomic_exchange(&warmup_pending, false)) {
+            if (!send_json("{\"type\":\"hello\",\"warmup\":true}"))
+                atomic_store(&warmup_pending, true);
+        }
         ui_tick((device_busy() && !atomic_load(&menu_active)) || portal_updating());
         if (ticks >= 50 && atomic_exchange(&boot_complete, false)) {
             // Confirm only after hardware, UI, networking and local web service initialized.

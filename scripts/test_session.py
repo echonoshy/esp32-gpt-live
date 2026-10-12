@@ -26,7 +26,7 @@ def log(kind, **values):
 
 
 def codex():
-    log("codex_options", args=sys.argv)
+    log("codex_options", args=sys.argv, pid=os.getpid())
     for line in sys.stdin:
         m = json.loads(line)
         method, params = m["method"], m.get("params", {})
@@ -85,6 +85,22 @@ async def worker():
                 if isinstance(m, bytes):
                     log("audio", enabled=enabled, size=len(m), worker=ident, at=time.monotonic())
                     if enabled:
+                        if struct.unpack_from("<h", m)[0] == 2700:
+                            # Realistic interleaving: old assistant owns its caption until done.
+                            played = 12
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"assistant","text":"old answer"}))
+                            await ws.send(struct.pack("<h",2699)*480)
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"user","text":"new question"}))
+                            await ws.send(struct.pack("<h",2701)*480)
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"assistant","text":"old tail"}))
+                            await ws.send(struct.pack("<h",2702)*480)
+                            await ws.send(json.dumps({"type":"transcript","role":"assistant","text":"old tail"}))
+                            await ws.send(struct.pack("<h",2703)*480)
+                            await ws.send(json.dumps({"type":"transcript","role":"user","text":"new question"}))
+                            await ws.send(json.dumps({"type":"transcript_delta","role":"assistant","text":"new answer"}))
+                            await ws.send(struct.pack("<h",2800)*480)
+                            await ws.send(json.dumps({"type":"transcript","role":"assistant","text":"new answer"}))
+                            continue
                         frames += 1
                         if frames == 1:
                             input_at = time.monotonic()
@@ -205,8 +221,18 @@ async def check():
                     await ws.send(struct.pack("<h", 1200) * 480)
                 await until(lambda: len(events("audio")) == count + 6)
                 await asyncio.sleep(0.25)
-                assert not any(isinstance(m,dict) and m.get("type")=="clear" for m in messages), "natural speech forced local interruption"
+                assert sum(isinstance(m,dict) and m.get("type")=="clear" for m in messages) == 1, "recognized input must clear once, not on every caption"
                 assert not events("interrupt"), "natural speech injected a stop instruction"
+                await asyncio.sleep(0.5)
+                messages.clear()
+                await ws.send(struct.pack("<h",2700)*480)
+                await until(lambda:any(isinstance(m,bytes) and struct.unpack_from("<h",m,4)[0]==2800 for m in messages))
+                clear = next(i for i,m in enumerate(messages) if isinstance(m,dict) and m.get("type")=="clear")
+                samples = [struct.unpack_from("<h",m,4)[0] for m in messages[clear+1:] if isinstance(m,bytes)]
+                assert all(x not in (2699,2701,2702,2703) for x in samples), "old speech escaped after barge-in"
+                assert not events("interrupt"), "natural speech injected stop text"
+                print("PASS: recognized barge-in clears once, suppresses old PCM and old caption tails, resumes new answer on same session")
+                messages.clear()
                 sessions_before_cancel=len(events("session"))
                 await send("cancel")
                 await until(lambda:any(isinstance(m,dict) and m.get("type")=="clear" for m in messages))
@@ -466,8 +492,42 @@ async def check():
                 await until(lambda: any(isinstance(m, bytes) for m in messages))
                 await send('stop')
                 await until(lambda: any(isinstance(m, dict) and m.get('type') == 'stopped' for m in messages))
+                # Opt-in idle preparation must not start realtime or capture audio.
+                messages.clear()
+                old_threads = len(events('thread_config'))
+                old_sessions = len(events('session'))
+                await send('hello', warmup=True)
+                await until(lambda:len(events('thread_config'))==old_threads+1)
+                await asyncio.sleep(0.1)
+                assert len(events('session')) == old_sessions
+                assert not any(isinstance(m,bytes) for m in messages)
+                await send('start', protocol=3, mode='ptt')
+                await until(lambda:any(isinstance(m,dict) and m.get('state')=='ready' for m in messages))
+                assert len(events('thread_config'))==old_threads+1, 'warm backend was discarded at start'
+                await send('stop')
+                await until(lambda:len(events('thread_config'))==old_threads+2)
+                warm_pid = events('codex_options')[-1]['pid']
+                # Idle children can exit after successful preparation (upgrade/crash).
+                # The next start must recover without asking the user to retry.
+                import signal
+                os.kill(warm_pid, signal.SIGTERM)
+                await asyncio.sleep(0.15)
+                messages.clear()
+                await send('start', protocol=3, mode='ptt')
+                await until(lambda:any(isinstance(m,dict) and m.get('state')=='ready' for m in messages))
+                assert len(events('thread_config')) == old_threads+3
+                assert not any(isinstance(m,dict) and m.get('type')=='error' for m in messages)
+                await send('stop')
+                await until(lambda:len(events('thread_config'))==old_threads+4)
+                warm_pid = events('codex_options')[-1]['pid']
                 await ws.close()
                 await reader
+                def gone():
+                    try: os.kill(warm_pid, 0)
+                    except ProcessLookupError: return True
+                    return False
+                await until(gone)
+                print('PASS: idle warmup creates no realtime audio, is reused on start, recovers dead children, replenishes after stop and dies on disconnect')
                 print("PASS: startup capture and early release, release-only model input, tagged playback, voice/prompt, fresh conversation, continuous duplex without automatic stop prompts, explicit cancellation, menu pause/resume, idle stop acknowledgement")
                 print(f"PASS: streaming PTT input, held-output gate, all 12 reply frames preserved, buffered first audio {first_audio_ms} ms (offline only), mode switch preserves context, live-to-PTT startup queue")
                 print('PASS: compressed 244/248-byte wire with PCM media compatibility, silent transport probe creates no upstream session')

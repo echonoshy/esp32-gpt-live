@@ -27,6 +27,10 @@ pub struct Codex {
 }
 
 impl Codex {
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None)) && !self.reader.is_finished()
+    }
+
     pub async fn open() -> Result<Self> {
         let workspace = crate::context::Workspace::open(
             std::env::var_os("VOICE_CONTEXT_DIR")

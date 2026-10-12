@@ -6,6 +6,7 @@ mod live;
 mod preferences;
 mod ptt;
 mod reply_buffer;
+mod warm;
 use conversation::{AudioAction, Conversation};
 use preferences::Preferences;
 use ptt::PushToTalk;
@@ -98,9 +99,15 @@ async fn main() -> Result<()> {
             "/media",
             get(|| async { Html(include_str!("../web/worker.html")) }),
         )
-        .route("/voice_setup.js", get(|| async {
-            ([("content-type", "text/javascript")], include_str!("../web/voice_setup.js"))
-        }))
+        .route(
+            "/voice_setup.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript")],
+                    include_str!("../web/voice_setup.js"),
+                )
+            }),
+        )
         .route(
             "/worklet.js",
             get(|| async {
@@ -186,6 +193,8 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let mut session: Option<(Tx, tokio::task::JoinHandle<()>)> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     let mut last_rx = tokio::time::Instant::now();
+    let mut prewarm = false;
+    let mut warm = None;
     let mut compressed = false;
     let mut batched = false;
     let wire_compressed = Arc::new(AtomicBool::new(false));
@@ -251,6 +260,12 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
     let mut graceful_close = false;
     tracing::info!("device connected");
     'device: loop {
+        if session.as_ref().is_some_and(|(_, task)| task.is_finished()) {
+            session = None;
+        }
+        if prewarm && session.is_none() && warm.is_none() {
+            warm = Some(warm::Backend::new());
+        }
         tokio::select! {
             frame=source.next()=>{
                 let frame=match frame {
@@ -300,8 +315,9 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                                 let output=out.clone();let shared=app.clone();
                                 let prefs=match Preferences::parse(&v) { Ok(p)=>p, Err(error)=>{let _=send(&output,voice_error(&error));continue} };
                                 let probe=kind=="probe";
+                                let prepared=if probe {None} else {warm.take()};
                                 session=Some((tx,tokio::spawn(async move {
-                                    let result=if probe {run_probe(rx,output.clone()).await} else {run_session(shared,rx,output.clone(),prefs).await};
+                                    let result=if probe {run_probe(rx,output.clone()).await} else {run_session(shared,rx,output.clone(),prefs,prepared).await};
                                     if let Err(error)=result {
                                         // No account tokens, SDP or conversation text in logs.
                                         tracing::warn!(error=%format!("{error:#}"),"voice session ended with error");
@@ -322,7 +338,10 @@ async fn device(socket: WebSocket, app: Shared, _slot: Slot) {
                             let _=send(&out,text(json!({"type":"stopped"})));
                         } else if matches!(kind,"ptt_start"|"ptt_end"|"cancel"|"interrupt"|"playback_drained"|"pause"|"resume"|"mode") {
                             if let Some((tx,_))=&session {if send(tx,Message::Text(s)).is_err(){break}}
-                        } else if kind!="hello" {break}
+                        } else if kind=="hello" {
+                            prewarm = v["warmup"] == true;
+                            if !prewarm { warm = None; }
+                        } else {break}
                     }
                 }
             },
@@ -481,6 +500,7 @@ async fn run_session(
     mut input: mpsc::Receiver<Message>,
     output: Tx,
     prefs: Preferences,
+    prepared: Option<warm::Backend>,
 ) -> Result<()> {
     let opening = tokio::time::Instant::now();
     send(&output, status("connecting"))?;
@@ -503,7 +523,10 @@ async fn run_session(
             "--disable-renderer-backgrounding",
         ])
         .arg(format!("--user-data-dir={}", profile.path().display()))
-        .arg(format!("http://127.0.0.1:{}/media?voice={}#{}", app.port, prefs.voice, id))
+        .arg(format!(
+            "http://127.0.0.1:{}/media?voice={}#{}",
+            app.port, prefs.voice, id
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -523,9 +546,7 @@ async fn run_session(
             Ok::<_, anyhow::Error>((worker,sdp))
         };
         let backend = async {
-            let mut rpc=codex::Codex::open().await?;
-            tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup account ready");
-            rpc.prepare().await?;
+            let rpc=warm::acquire(prepared).await?;
             tracing::info!(elapsed_ms=opening.elapsed().as_millis() as u64,"startup thread ready");
             Ok::<_, anyhow::Error>(rpc)
         };
@@ -690,8 +711,8 @@ async fn run_session(
                             if !valid_pcm(&bytes){bail!("invalid media frame")}
                             let voiced=bytes.chunks_exact(2).any(|s|i16::from_le_bytes([s[0],s[1]]).unsigned_abs()>30);
                             if continuous {
-                                // Forward the full media clock, including silence. Natural user speech
-                                // never cancels playback locally or injects a stop instruction.
+                                // Keep the full media clock except for superseded replies.
+                                // Recognition, not microphone volume, grants the interruption boundary.
                                 if paused || !live.allowed() {continue;}
                                 if !live_playing {
                                     live_playing=true;
@@ -770,7 +791,12 @@ async fn run_session(
                                     let has_text=value["text"].as_str().is_some_and(|s|!s.trim().is_empty());
                                     let done=value["type"]=="transcript";
                                     if continuous {
-                                        live.transcript(role,done,has_text);
+                                        if live.transcript(role,done,has_text) {
+                                            let epoch=flow.interrupt(started.elapsed().as_millis() as u64);
+                                            live_playing=false;
+                                            send(&output,text(json!({"type":"clear","epoch":epoch,"reason":"speech"})))?;
+                                            tracing::info!(epoch,"recognized speech cleared previous playback");
+                                        }
                                         if has_text {last_activity=tokio::time::Instant::now();}
                                         if role=="user" && has_text && !live.awaiting_input() {live_waiting=true;}
                                         if role=="user" && has_text && !live.awaiting_input() && !live_active {

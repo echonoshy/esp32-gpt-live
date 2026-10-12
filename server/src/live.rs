@@ -1,5 +1,5 @@
 //! Continuous media never uses a silence/drain boundary to grant microphone permission.
-//! Only explicit user cancellation suppresses output. Caption ownership prevents an old
+//! Recognized user speech and explicit cancellation suppress output. Caption ownership prevents an old
 //! assistant tail (including done-only events) from reopening canceled playback.
 #[derive(Default)]
 pub struct Live {
@@ -21,13 +21,16 @@ impl Live {
     pub fn allowed(&self) -> bool {
         !self.suppressed
     }
-    pub fn transcript(&mut self, role: &str, done: bool, has_text: bool) {
+    pub fn transcript(&mut self, role: &str, done: bool, has_text: bool) -> bool {
+        let mut new_input = false;
         match role {
             "user" => {
                 if has_text && self.user.is_none() {
                     self.generation = self.generation.wrapping_add(1);
                     self.user = Some(self.generation);
                     self.waiting_user = false;
+                    self.suppressed = true;
+                    new_input = true;
                 }
                 if done {
                     self.user = None;
@@ -47,21 +50,33 @@ impl Live {
             }
             _ => {}
         }
+        new_input
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn natural_overlap_never_suppresses_output() {
+    fn natural_overlap_clears_once_and_rejects_old_answer() {
         let mut s = Live::default();
         s.transcript("assistant", false, true);
+        assert!(s.transcript("user", false, true));
         for _ in 0..100 {
-            s.transcript("user", false, true);
-            assert!(s.allowed());
+            assert!(!s.transcript("user", false, true));
+            s.transcript("assistant", false, true);
+            assert!(!s.allowed());
         }
-        s.transcript("user", true, true);
+        assert!(!s.transcript("user", true, true));
         s.transcript("assistant", true, true);
+        assert!(!s.allowed());
+        s.transcript("assistant", false, true);
+        assert!(s.allowed());
+    }
+    #[test]
+    fn empty_user_events_do_not_interrupt() {
+        let mut s = Live::default();
+        assert!(!s.transcript("user", false, false));
+        assert!(!s.transcript("user", true, false));
         assert!(s.allowed());
     }
     #[test]
