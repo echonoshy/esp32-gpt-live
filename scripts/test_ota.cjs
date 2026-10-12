@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict');
+const {descriptor,verify}=require('../firmware/main/ota.js');
+const b=new Uint8Array(288),v=new DataView(b.buffer);b[0]=0xe9;v.setUint32(32,0xabcd5432,true);
+b.set(Buffer.from('0.10.6'),48);b.set(Buffer.from('passport-gpt-live'),80);b.fill(0x42,176,208);
+const d=descriptor(b.buffer);assert.equal(d.version,'0.10.6');assert.equal(d.image_id,'42'.repeat(32));
+assert.throws(()=>descriptor(new ArrayBuffer(10)));b[0]=0;assert.throws(()=>descriptor(b.buffer));b[0]=0xe9;
+b[80]=65;assert.throws(()=>descriptor(b.buffer));b[80]=112;
+d.device_id='unit-a';const p={...d,boot_id:'before'};
+assert.equal(verify(p,{...d,boot_id:'before',ota_state:'valid'}),'waiting','same-version upload cannot confirm without reboot');
+assert.equal(verify(p,{...d,boot_id:'after',ota_state:'pending_verify'}),'waiting');
+assert.equal(verify(p,{...d,boot_id:'after',ota_state:'valid'}),'confirmed');
+assert.equal(verify(p,{...d,boot_id:'after',image_id:'old',ota_state:'valid'}),'different','same version/different build is not success');
+assert.equal(verify(p,{...d,boot_id:'after',version:'0.10.5',ota_state:'valid'}),'different');
+assert.equal(verify(p,{...d,boot_id:'after',ota_state:'unknown'}),'waiting');
+assert.equal(verify(p,{version:'0.10.6'}),'wrong_device');
+assert.equal(verify(p,{...d,device_id:'unit-b',boot_id:'after',ota_state:'valid'}),'wrong_device');
+console.log('PASS: OTA image parsing, identity, reboot boundary, pending boot, same-version rebuild and rollback distinction');

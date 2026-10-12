@@ -48,7 +48,7 @@ static char art_readout[16];
 static int art_kind; // 0: voice, 1: live, 2: list, 3: adjustment, 4: confirmation
 static void draw_art(lv_event_t *event);
 static int64_t last_touch, volume_until;
-static bool screen_on = true, setup_visible, menu_visible, home_visible, live_mode;
+static bool screen_on = true, setup_visible, menu_visible, home_visible, live_mode, update_visible;
 static int shown_battery = -2, shown_volume = -1;
 
 // A single atomic word publishes level and timestamp together. The 24-bit ms
@@ -264,6 +264,12 @@ void ui_set(const char *state, const char *detail)
     // Keep menus and QR pages stable while background network events arrive.
     if ((!qr || lv_obj_is_hidden(qr)) && !menu_visible) {
         const char *text = state_text(state);
+        if (update_visible) {
+            lv_label_set_text(status_label, text);
+            lv_label_set_text(detail_label, detail);
+            bsp_lvgl_unlock();
+            return;
+        }
         if (strcmp(lv_label_get_text(status_label), text)) {
             lv_label_set_text(status_label, text);
             lv_obj_invalidate(body_surface);
@@ -544,6 +550,7 @@ void ui_show_home(int selected)
     ui_wake();
     if (!bsp_lvgl_lock(100))
         return;
+    update_visible = false;
     if (qr) {
         lv_obj_delete(qr);
         qr = NULL;
@@ -583,6 +590,7 @@ static void show_qr(const char *title, const char *payload, const char *instruct
     if (!bsp_lvgl_lock(100))
         return;
     close_home();
+    update_visible = false;
     lv_obj_set_hidden(volume_popup, true);
     lv_obj_set_hidden(selection, true);
     lv_obj_set_hidden(status_surface, false);
@@ -618,18 +626,18 @@ void ui_show_setup(const char *ssid, bool website)
 {
     char payload[96], detail[128];
     if (website) {
-        show_qr("02 / SET UP WI-FI", "http://192.168.4.1/", "OK: switch QR\nHold OK: restart",
+        show_qr("02 / SET UP WI-FI", "http://192.168.4.1/", "Open Wi-Fi sign-in\nOr scan this backup",
                 true);
     } else {
         snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", ssid);
-        snprintf(detail, sizeof(detail), "%s\nConnect, then tap OK", ssid);
+        snprintf(detail, sizeof(detail), "%s\nScan to join and set up", ssid);
         show_qr("01 / JOIN HOTSPOT", payload, detail, true);
     }
 }
 
 void ui_show_settings(const char *url)
 {
-    show_qr("SCAN TO CONNECT", url, "Use the same Wi-Fi\nHold OK: back", false);
+    show_qr("OPEN SETTINGS", url, "Use the same Wi-Fi\nHold OK: back", false);
 }
 
 void ui_show_guide(void)
@@ -647,6 +655,7 @@ void ui_show_guide(void)
     }
     setup_visible = false;
     menu_visible = false;
+    update_visible = false;
     lv_obj_set_hidden(selection, true);
     lv_obj_set_hidden(status_surface, false);
     lv_obj_set_pos(status_label, 17, 78);
@@ -678,6 +687,39 @@ void ui_show_guide(void)
     bsp_lvgl_unlock();
 }
 
+void ui_show_update(void)
+{
+    ui_wake();
+    if (!bsp_lvgl_lock(100))
+        return;
+    close_home();
+    if (qr) {
+        lv_obj_delete(qr);
+        qr = NULL;
+    }
+    setup_visible = menu_visible = false;
+    update_visible = true;
+    // Hide chat artwork and controls throughout checking, download and result.
+    lv_obj_set_hidden(volume_popup, true);
+    lv_obj_set_hidden(selection, true);
+    lv_obj_set_hidden(status_surface, true);
+    lv_obj_set_hidden(body_surface, true);
+    lv_obj_set_hidden(guide, true);
+    lv_label_set_text(mode_label, "FIRMWARE");
+    lv_obj_set_style_text_font(mode_label, &ui_font_22, 0);
+    lv_obj_set_style_text_color(mode_label, lv_color_hex(UI_MINT), 0);
+    lv_obj_set_pos(mode_label, 12, 56);
+    lv_obj_set_size(mode_label, 216, 32);
+    lv_obj_set_pos(status_label, 12, 118);
+    lv_obj_set_size(status_label, 216, 76);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(UI_TEXT), 0);
+    lv_obj_set_pos(detail_label, 0, 218);
+    lv_obj_set_size(detail_label, 240, 90);
+    lv_label_set_text(status_label, "CHECKING UPDATE");
+    lv_label_set_text(detail_label, "Please wait\nKeep power connected");
+    bsp_lvgl_unlock();
+}
+
 void ui_mode(bool continuous)
 {
     live_mode = continuous;
@@ -697,6 +739,7 @@ void ui_show_menu(const char *title, const char *const *items, int count, int se
     lv_obj_set_hidden(volume_popup, true);
     menu_visible = true;
     setup_visible = false;
+    update_visible = false;
     lv_obj_set_hidden(status_surface, true);
     lv_obj_set_hidden(body_surface, true);
     lv_obj_set_pos(status_label, 12, 78);

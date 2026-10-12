@@ -16,7 +16,7 @@ typedef enum {
     EDIT_SCREEN,
     EDIT_IDLE,
     CONFIRM_NEW,
-    CONFIRM_PHONE,
+    CONFIRM_UPDATE,
     CONFIRM_WIFI,
     INFO
 } page_t;
@@ -38,7 +38,7 @@ static int count(void)
     case PICK_VOICE:
         return VOICE_COUNT + 1;
     case CONFIRM_NEW:
-    case CONFIRM_PHONE:
+    case CONFIRM_UPDATE:
     case CONFIRM_WIFI:
         return 2;
     default:
@@ -76,7 +76,7 @@ void menu_refresh(void)
         snprintf(rows[1], sizeof(rows[1]), "Brightness: %d", p.brightness);
         snprintf(rows[2], sizeof(rows[2]), "Screen off: %d s", p.screen_seconds);
         snprintf(rows[3], sizeof(rows[3]), "Idle end: %d s", p.idle_seconds);
-        snprintf(rows[4], sizeof(rows[4]), "Web setup / update");
+        snprintf(rows[4], sizeof(rows[4]), "Firmware update");
         snprintf(rows[5], sizeof(rows[5]), "Back");
         break;
     case NETWORK:
@@ -98,11 +98,11 @@ void menu_refresh(void)
         snprintf(rows[1], sizeof(rows[1]), "Back");
         snprintf(hint, sizeof(hint), "Clears this session");
         break;
-    case CONFIRM_PHONE:
-        snprintf(title, sizeof(title), "OPEN WEB SETUP?");
-        snprintf(rows[0], sizeof(rows[0]), "End session / open");
+    case CONFIRM_UPDATE:
+        snprintf(title, sizeof(title), "UPDATE FIRMWARE?");
+        snprintf(rows[0], sizeof(rows[0]), "Check / install latest");
         snprintf(rows[1], sizeof(rows[1]), "Back");
-        snprintf(hint, sizeof(hint), "Ends / clears session");
+        snprintf(hint, sizeof(hint), "Ends session / keep power on");
         break;
     case CONFIRM_WIFI:
         snprintf(title, sizeof(title), "WI-FI SETUP?");
@@ -171,7 +171,7 @@ menu_action_t menu_back(void)
         enter(ROOT);
         selected = 3;
         break;
-    case CONFIRM_PHONE:
+    case CONFIRM_UPDATE:
         enter(DEVICE);
         selected = 4;
         break;
@@ -247,7 +247,7 @@ menu_action_t menu_key(int key)
             if (selected < 4)
                 enter((page_t[]){EDIT_VOLUME, EDIT_BRIGHT, EDIT_SCREEN, EDIT_IDLE}[selected]);
             else if (selected == 4)
-                enter(CONFIRM_PHONE);
+                enter(CONFIRM_UPDATE);
             else
                 return menu_back();
             break;
@@ -276,11 +276,9 @@ menu_action_t menu_key(int key)
             if (selected == 0)
                 return MENU_NEW_CHAT;
             return menu_back();
-        case CONFIRM_PHONE:
+        case CONFIRM_UPDATE:
             if (selected == 0) {
-                enter(DEVICE);
-                selected = 4;
-                return MENU_PHONE;
+                enter(DEVICE); selected = 4; return MENU_UPDATE;
             }
             return menu_back();
         case CONFIRM_WIFI:

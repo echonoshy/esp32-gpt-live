@@ -235,10 +235,21 @@ static void test_audio_animation(void)
     printf("Audio animation: DC/noise gate, PCM sources, silence/stale decay, fixed text, menu and sleep checks passed\n");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     ui_init();
     ui_battery(86, 70);
+    if (argc == 2 && !strcmp(argv[1], "--update-only")) {
+        ui_show_update();
+        capture("update-checking");
+        ui_set("DOWNLOADING UPDATE", "v0.10.8 / 45%\nKeep power connected");
+        capture("update-downloading");
+        ui_set("UP TO DATE", "Latest version installed\nOK: back");
+        capture("update-current");
+        ui_set("UPDATE NOT INSTALLED", "Download interrupted\nOK: back");
+        capture("update-failed");
+        return errors ? 1 : 0;
+    }
     test_audio_animation();
     for (int i = 0; i < 3; i++) {
         char name[32];
@@ -333,7 +344,7 @@ int main(void)
     for (int i = 0; i < 4; i++)
         menu_key(1);
     menu_key(0);
-    capture("phone-confirm");
+    capture("update-confirm");
     settings_root();
     menu_key(1);
     menu_key(1);
@@ -355,7 +366,7 @@ int main(void)
     capture("qr-settings");
     ui_set("SPEAKING", "Hold OK: home");
     capture("qr-network-event");
-    assert(!strcmp(lv_label_get_text(status_label), "SCAN TO CONNECT"));
+    assert(!strcmp(lv_label_get_text(status_label), "OPEN SETTINGS"));
     ui_mode(false);
     ui_show_guide();
     ui_battery(9, 0);

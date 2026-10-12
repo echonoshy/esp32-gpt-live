@@ -1,0 +1,40 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>mic-on / WI-FI</title>
+<style>
+body{background:#141414;color:#f3eedb;font:16px system-ui,sans-serif;max-width:440px;margin:24px auto;padding:20px}h1{font:900 italic 36px Impact,sans-serif;background:#f50065;padding:16px;border:3px solid #f3eedb;box-shadow:4px 4px #ffe900}p{line-height:1.6}label{display:block;margin:20px 0}input,select,button{box-sizing:border-box;width:100%;padding:12px;font:inherit;margin-top:8px;border:2px solid #f3eedb;border-radius:0}input,select{background:#fffdf4;color:#141414}button{background:#f50065;color:#fff;font-weight:750;cursor:pointer}button:disabled{opacity:.5;cursor:wait}:focus-visible{outline:3px solid #80dfbf;outline-offset:3px}#notice{white-space:pre-wrap;color:#80dfbf}small{color:#c8c3b3}[hidden]{display:none!important}details{margin-top:32px}
+</style>
+<h1>mic-on / WI-FI</h1><p>Select a nearby <b>2.4 GHz network</b>. Stay connected to the mic-on hotspot while we check the connection. No app needed.</p>
+<p id="notice" role="status" aria-live="polite">Loading setup…</p>
+<form id="connect">
+<label>Nearby networks<select id="network"><option value="">Scanning…</option></select></label>
+<button id="refresh" type="button">REFRESH NETWORKS</button>
+<label id="manual-row" hidden>Network name<input id="ssid" autocomplete="off" maxlength="32"></label>
+<label id="password-row">Password<input id="password" type="password" autocomplete="new-password" maxlength="64"></label>
+<p id="manual-help" hidden>For a hidden network, enter its name exactly. To configure this phone's own hotspot, use a second phone or computer so the hotspot can stay on during the connection check.</p>
+<button id="join" disabled>CONNECT</button></form>
+<section id="success" hidden><p id="result"></p><button id="finish">FINISH &amp; RESTART</button><p>After finishing, reconnect your phone to your usual Wi-Fi.</p></section>
+<details><summary>Saved networks</summary><div id="saved"></div></details>
+<p><small>Can't see your network? Turn on 2.4 GHz Wi-Fi, move closer, or choose Enter manually. Enterprise and legacy WEP networks are not supported. Hold OK on the device to leave setup.</small></p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), note=text=>$('notice').textContent=text;
+let nonce='', busy=false, scanning=false, rows=[], polling=false, finished=false, latestState='idle', pollTimer;
+async function request(path,method='GET',body){const r=await fetch(path,{method,body,headers:method==='POST'?{'X-Setup-Nonce':nonce,'Content-Type':'application/x-www-form-urlencoded'}:{},cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error(await r.text());return r}
+function controls(){for(const id of ['network','ssid','password','join','refresh'])$(id).disabled=busy||scanning||!nonce||finished}
+function choice(){const manual=$('network').value==='manual', row=rows[Number($('network').value)];$('manual-row').hidden=$('manual-help').hidden=!manual;$('ssid').required=manual;const secured=manual||!row||row.secured;$('password-row').hidden=!secured;$('password').required=!manual&&secured;if(!secured)$('password').value=''}
+function render(list){rows=list.filter(n=>n.supported).sort((a,b)=>b.rssi-a.rssi);const previous=$('network').selectedOptions[0]?.textContent;$('network').replaceChildren();for(const [i,n] of rows.entries()){const o=document.createElement('option');o.value=String(i);o.textContent=n.ssid+' · '+(n.rssi>=-60?'Strong':n.rssi>=-75?'Medium':'Weak')+' · '+(n.secured?'Password':'Open');$('network').append(o);if(o.textContent===previous)o.selected=true}const manual=document.createElement('option');manual.value='manual';manual.textContent='Enter manually / hidden network';$('network').append(manual);choice()}
+async function scan(){if(busy||finished)return;scanning=true;controls();note('Scanning nearby networks…');try{await request('/api/scan','POST','');}catch(e){scanning=false;controls();note(e.message+' Tap Refresh to retry.');return}poll()}
+async function poll(){clearTimeout(pollTimer);if(polling||finished)return;polling=true;try{
+ const s=await(await request('/api/setup')).json();nonce=s.nonce;latestState=s.state;busy=s.state==='connecting';
+ if(busy)note('Connecting and checking the IP address… Keep this page open.');
+ else if(s.state==='failed'){note(s.error);$('success').hidden=true}
+ else if(s.state==='connected'){const ok=s.connected;$('success').hidden=!ok;$('result').textContent='Connected to '+s.ssid+'. Network saved. Device address: '+s.ip;note(ok?'Connection confirmed. Tap Finish when ready.':'Connection was lost. Check the network and connect again.');}
+ const scan=await(await request('/api/scan')).json();const was=scanning;scanning=scan.scanning;
+ if(!scanning&&(was||!rows.length)){render(scan.networks);if(s.state==='idle')note(scan.error||(rows.length?'Select your network, then enter its password.':'No supported networks found. Refresh or enter manually.'));}
+ controls();
+ }catch(e){note('Connection to the device interrupted. Stay on the mic-on hotspot; retrying…');}finally{polling=false;if(!finished)pollTimer=setTimeout(poll,1000)}}
+$('network').onchange=choice;$('refresh').onclick=scan;
+$('connect').onsubmit=async e=>{e.preventDefault();if(busy||scanning||finished)return;const ssid=$('network').value==='manual'?$('ssid').value:rows[Number($('network').value)]?.ssid;if(!ssid){note('Select or enter a network.');return}busy=true;controls();$('success').hidden=true;note('Checking connection…');try{await request('/configure','POST',new URLSearchParams({ssid,password:$('password').value}));$('password').value='';}catch(e){busy=false;controls();note(e.message)}};
+$('finish').onclick=async()=>{if(finished)return;try{const r=await request('/finish','POST','');finished=true;note(await r.text());$('finish').disabled=true;controls()}catch(e){note(e.message)}};
+async function saved(){try{const names=await(await request('/networks')).json();for(const name of names){const row=document.createElement('p'),label=document.createElement('span'),b=document.createElement('button');label.textContent=name;b.textContent='FORGET & RESTART';b.onclick=async()=>{if(busy||scanning||finished)return;if(!confirm('Forget '+name+' and restart?'))return;try{const r=await request('/configure','POST',new URLSearchParams({forget:name}));finished=true;note(await r.text());controls()}catch(e){note(e.message)}};row.append(label,b);$('saved').append(row)}}catch(e){$('saved').textContent='Saved networks unavailable.'}}
+(async()=>{try{const s=await(await request('/api/setup')).json();nonce=s.nonce;busy=s.state==='connecting';latestState=s.state;controls();await saved();if(s.state==='idle')await scan();else poll();}catch(e){note('Could not load setup. Rejoin mic-on and reload.')}})();
+</script></html>

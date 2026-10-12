@@ -12,6 +12,7 @@ void ui_tick(bool active);
 void ui_show_setup(const char *ssid, bool website);
 void ui_show_settings(const char *url);
 void ui_show_guide(void);
+void ui_show_update(void);
 void ui_show_home(int selected);
 
 void ui_show_menu(const char *title, const char *const *items, int count, int selected,

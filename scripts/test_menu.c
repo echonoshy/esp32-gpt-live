@@ -114,15 +114,12 @@ int main(void)
     menu_key(0);
     assert(focus == 3 && prefs.idle_seconds == 300);
     menu_key(1);
-    assert(menu_key(0) == MENU_NONE && !strcmp(title, "OPEN WEB SETUP?"));
-    assert(menu_back() == MENU_NONE && focus == 4);
     menu_key(0);
-    menu_key(1);
-    assert(menu_key(0) == MENU_NONE && focus == 4);
-    menu_key(0);
-    assert(menu_key(0) == MENU_PHONE);
-    menu_refresh();
-    assert(!strcmp(title, "DEVICE") && focus == 4);
+    assert(!strcmp(title, "UPDATE FIRMWARE?"));
+    menu_back(); assert(!strcmp(title,"DEVICE") && focus==4);
+    menu_key(0); menu_key(1); assert(menu_key(0)==MENU_NONE && focus==4);
+    menu_key(0); assert(menu_key(0)==MENU_UPDATE);
+
     menu_back();
     assert(!strcmp(title, "SETTINGS") && focus == 1);
     menu_key(1);

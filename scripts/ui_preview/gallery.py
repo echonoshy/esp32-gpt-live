@@ -45,7 +45,7 @@ labels = {'home-0': '首页 · VOICE', 'home-1': '首页 · LIVE', 'home-2': '�
           'free-dialogue': 'LIVE 收听', 'settings': '设置', 'voices': '音色',
           'voices-last': '音色 · 末页', 'device': '设备', 'volume': '音量',
           'brightness': '亮度', 'screen-timeout': '息屏时间', 'idle-timeout': '空闲超时',
-          'network': '网络', 'connection-info': '连接信息', 'phone-confirm': '打开手机设置确认',
+          'network': '网络', 'connection-info': '连接信息', 'update-confirm': '更新固件确认',
           'network-confirm': '配网确认', 'reset-context': '重置确认',
           'qr-hotspot': '热点二维码', 'qr-setup': '配网二维码', 'qr-settings': '设置二维码',
           'low-battery': '低电量 / 离线', 'volume-popup': '音量浮层'}

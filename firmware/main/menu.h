@@ -7,7 +7,7 @@ typedef enum {
     MENU_NEW_CHAT,
     MENU_VOICE_CHANGED,
     MENU_WIFI,
-    MENU_PHONE
+    MENU_UPDATE
 } menu_action_t;
 // Open the three-entry home page, remembering the returning mode's selection.
 void menu_open(int selection);

@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "wifi_setup.h"
 #include "wifi_profiles.h"
 #include "cJSON.h"
 #include <stdlib.h>
@@ -29,9 +30,10 @@
 
 static const char *TAG = "passport_wifi";
 static EventGroupHandle_t s_wifi_events;
-static atomic_bool provisioning;
+static atomic_bool provisioning, radio_busy, setup_claimed;
+static atomic_uint disconnect_reason;
 static char setup_ssid[33];
-static bool setup_website;
+static atomic_bool setup_website;
 static wifi_profiles_t saved_profiles;
 bool voice_wifi_connected(void)
 {
@@ -67,6 +69,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "Wi-Fi disconnected, reason=%u", event->reason);
+        atomic_store(&disconnect_reason, event->reason);
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED);
         xEventGroupSetBits(s_wifi_events, WIFI_DISCONNECTED);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -80,6 +83,34 @@ esp_err_t voice_wifi_save(const char *ssid, const char *password)
     return wifi_profiles_save(ssid, password);
 }
 
+bool voice_wifi_radio_take(void)
+{
+    bool expected = false;
+    return atomic_compare_exchange_strong(&radio_busy, &expected, true);
+}
+void voice_wifi_radio_give(void) { atomic_store(&radio_busy, false); }
+void voice_wifi_setup_claim(void) { atomic_store(&setup_claimed, true); }
+
+// Called only while the setup worker owns the radio. The AP remains available.
+esp_err_t voice_wifi_test(const char *ssid, const char *password, unsigned *reason)
+{
+    xEventGroupClearBits(s_wifi_events, WIFI_DISCONNECTED);
+    if (esp_wifi_disconnect() == ESP_OK)
+        xEventGroupWaitBits(s_wifi_events, WIFI_DISCONNECTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(1000));
+    xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED | WIFI_DISCONNECTED);
+    atomic_store(&disconnect_reason, 0);
+    wifi_config_t config = {0};
+    memcpy(config.sta.ssid, ssid, strlen(ssid));
+    memcpy(config.sta.password, password, strlen(password));
+    config.sta.threshold.authmode = password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &config);
+    if (e == ESP_OK) e = esp_wifi_connect();
+    EventBits_t bits = e == ESP_OK ? xEventGroupWaitBits(s_wifi_events,
+        WIFI_CONNECTED | WIFI_DISCONNECTED, pdFALSE, pdFALSE, pdMS_TO_TICKS(20000)) : 0;
+    *reason = atomic_load(&disconnect_reason);
+    return bits & WIFI_CONNECTED ? ESP_OK : ESP_FAIL;
+}
+
 // A single task owns station connection attempts. Event callbacks only report state;
 // authentication/DHCP failures cannot trap us retrying one unavailable network forever.
 static void connection_task(void *unused)
@@ -89,6 +120,7 @@ static void connection_task(void *unused)
     bool boot_search = true;
     for (;;) {
         if (voice_wifi_provisioning()) {
+            if (atomic_load(&setup_claimed)) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
             wifi_sta_list_t clients = {0};
             // Scanning/roaming can change the shared radio channel. Let a phone
             // finish using the setup page before resuming background attempts.
@@ -96,6 +128,11 @@ static void connection_task(void *unused)
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
+        }
+        if (!voice_wifi_radio_take()) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+        if (voice_wifi_provisioning() && atomic_load(&setup_claimed)) {
+            voice_wifi_radio_give();
+            continue;
         }
         wifi_profile_t *p = &saved_profiles.entries[index];
         wifi_config_t config = {0};
@@ -119,10 +156,18 @@ static void connection_task(void *unused)
             // In fallback AP mode main has not started the voice service. Restart into
             // the normal boot path once a saved hotspot becomes available again.
             if (voice_wifi_provisioning()) {
+                wifi_sta_list_t clients = {0};
+                esp_wifi_ap_get_sta_list(&clients);
+                if (atomic_load(&setup_claimed) || clients.num > 0) {
+                    voice_wifi_radio_give();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    continue;
+                }
                 ui_set("WI-FI CONNECTED", "Restarting device");
                 vTaskDelay(pdMS_TO_TICKS(500));
                 esp_restart();
             }
+            voice_wifi_radio_give();
             xEventGroupWaitBits(s_wifi_events, WIFI_DISCONNECTED, pdFALSE, pdTRUE,
                                 portMAX_DELAY);
             // Give a previously working network one fresh attempt before moving on.
@@ -133,6 +178,7 @@ static void connection_task(void *unused)
         if (!(bits & WIFI_DISCONNECTED) && esp_wifi_disconnect() == ESP_OK)
             xEventGroupWaitBits(s_wifi_events, WIFI_DISCONNECTED, pdFALSE, pdTRUE,
                                 pdMS_TO_TICKS(1000));
+        voice_wifi_radio_give();
         index = (index + 1) % saved_profiles.count;
         if (boot_search && ++attempts == saved_profiles.count) {
             xEventGroupSetBits(s_wifi_events, WIFI_EXHAUSTED);
@@ -223,40 +269,19 @@ static esp_err_t saved_networks(httpd_req_t *request)
 
 static esp_err_t setup_page(httpd_req_t *request)
 {
-    static const char page[] =
-        "<!doctype html><html lang=en><meta charset=utf-8>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>mic-on / WI-FI</title><style>"
-        "body{color:#f3eedb;background:#141414;font:16px system-ui,sans-serif;"
-        "max-width:420px;margin:32px auto;padding:20px;color-scheme:light}"
-        "h1{font:900 italic 32px Impact,sans-serif;letter-spacing:.02em;"
-        "background:#f50065;border:3px solid #f3eedb;padding:16px;box-shadow:4px 4px #ffe900}"
-        "p{color:#c8c3b3;line-height:1.6}form{background:#f3eedb;color:#141414;"
-        "padding:20px;border:3px solid #141414;outline:2px solid #f3eedb;box-shadow:5px 5px #8c52c5}"
-        "label{display:block;font-weight:650;margin-bottom:16px}"
-        "input,button{box-sizing:border-box;width:100%;padding:12px;margin:7px 0;"
-        "font:inherit;border:2px solid #141414;border-radius:0;background:#fffdf4;color:#141414}"
-        "button{background:#f50065;color:#f3eedb;font-weight:800;box-shadow:3px 3px #ffe900;cursor:pointer}"
-        "input:focus-visible,button:focus-visible{outline:3px solid #8c52c5;outline-offset:2px}</style>"
-        "<h1>mic-on / WI-FI</h1><p>Enter a <b>2.4 GHz Wi-Fi</b> network or phone hotspot. "
-        "Save up to 8 networks. Adding one keeps the others; the same name updates its password. "
-        "The device tries saved networks automatically and restarts after saving.</p>"
-        "<p>This setup hotspot has no internet. Stay connected until saving is complete.</p>"
-        "<form method=post action=/configure>"
-        "<label>Network name<input name=ssid required autocomplete=off></label>"
-        "<label>Password<input name=password type=password autocomplete=new-password></label>"
-        "<button>SAVE &amp; RESTART</button></form><h2>Saved networks</h2><div id=saved></div>"
-        "<script>fetch('/networks').then(r=>{if(!r.ok)throw Error();return r.json()}).then(names=>{"
-        "const box=document.getElementById('saved');if(!names.length)box.textContent='No saved networks.';"
-        "for(const name of names){const f=document.createElement('form');f.method='post';f.action='/configure';"
-        "const label=document.createElement('p');label.textContent=name;f.append(label);"
-        "const input=document.createElement('input');input.type='hidden';input.name='forget';input.value=name;f.append(input);"
-        "const b=document.createElement('button');b.textContent='FORGET & RESTART';f.append(b);"
-        "f.onsubmit=()=>confirm('Forget '+name+' and restart?');box.append(f)}})"
-        ".catch(()=>{document.getElementById('saved').textContent='Could not load saved networks.'})</script></html>";
+    extern const char setup_start[] asm("_binary_setup_html_start");
+    extern const char setup_end[] asm("_binary_setup_html_end");
+    // Canonical origin makes captive-portal probes and relative API URLs agree.
+    char host[80] = {0};
+    httpd_req_get_hdr_value_str(request, "Host", host, sizeof(host));
+    if (strcmp(host, "192.168.4.1") && strcmp(host, "192.168.4.1:80")) {
+        httpd_resp_set_status(request, "302 Found");
+        httpd_resp_set_hdr(request, "Location", "http://192.168.4.1/");
+        return httpd_resp_sendstr(request, "Open http://192.168.4.1/ after joining the device hotspot.");
+    }
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(request, setup_start, setup_end - setup_start - 1);
 }
 
 static void delayed_restart(void *arg)
@@ -268,6 +293,8 @@ static void delayed_restart(void *arg)
 
 static esp_err_t save_config(httpd_req_t *request)
 {
+    if (!wifi_setup_authorized(request))
+        return httpd_resp_send_err(request, HTTPD_403_FORBIDDEN, "Reload this page.");
     if (request->content_len <= 0 || request->content_len > 512) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid form");
     }
@@ -286,26 +313,39 @@ static esp_err_t save_config(httpd_req_t *request)
     esp_err_t e;
     bool forget = form_value(body, "forget", ssid, sizeof(ssid));
     if (forget) {
+        voice_wifi_setup_claim();
+        if (!voice_wifi_radio_take()) {
+            httpd_resp_set_status(request, "409 Conflict");
+            return httpd_resp_sendstr(request, "Wait for Wi-Fi work to finish.");
+        }
         e = wifi_profiles_forget(ssid);
     } else {
         if (!form_value(body, "ssid", ssid, sizeof(ssid)) || !ssid[0])
             return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "SSID required");
         if (!form_value(body, "password", password, sizeof(password)))
             return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid password");
-        e = voice_wifi_save(ssid, password);
+        esp_err_t result = wifi_setup_connect(request, ssid, password);
+        memset(password, 0, sizeof(password));
+        memset(body, 0, sizeof(body));
+        return result;
     }
     memset(password, 0, sizeof(password));
     memset(body, 0, sizeof(body));
-    if (e != ESP_OK)
+    if (e != ESP_OK) {
+        voice_wifi_radio_give();
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                    e == ESP_ERR_NO_MEM ? "8 networks saved. Forget one first."
                                                        : "Could not save Wi-Fi. Check your input.");
+    }
 
     ui_set("WI-FI SAVED", "Restarting device");
     httpd_resp_set_type(request, "text/plain; charset=utf-8");
     httpd_resp_sendstr(request, forget ? "Network forgotten. Restarting device."
                                       : "Wi-Fi saved; other networks kept. Restarting. If this is your phone hotspot, enable it now.");
-    xTaskCreate(delayed_restart, "restart", 2048, NULL, 4, NULL);
+    if (xTaskCreate(delayed_restart, "restart", 2048, NULL, 4, NULL) != pdPASS) {
+        voice_wifi_radio_give();
+        ui_set("NETWORK FORGOTTEN", "Restart device manually");
+    }
     return ESP_OK;
 }
 
@@ -351,6 +391,20 @@ static void dns_task(void *unused)
     }
 }
 
+static void setup_screen_task(void *unused)
+{
+    bool joined = false;
+    for (;;) {
+        wifi_sta_list_t clients = {0};
+        if (esp_wifi_ap_get_sta_list(&clients) == ESP_OK && clients.num > 0 && !joined) {
+            joined = true;
+            setup_website = true;
+            ui_show_setup(setup_ssid, true);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 static esp_err_t start_provisioning(bool station_running)
 {
     uint8_t mac[6];
@@ -359,6 +413,9 @@ static esp_err_t start_provisioning(bool station_running)
 
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
     if (!station_running) {
+        esp_netif_create_default_wifi_sta();
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
         wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
         ESP_ERROR_CHECK(esp_wifi_init(&init));
         ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
@@ -369,7 +426,7 @@ static esp_err_t start_provisioning(bool station_running)
     config.ap.channel = 1;
     config.ap.max_connection = 4;
     config.ap.authmode = WIFI_AUTH_OPEN;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(station_running ? WIFI_MODE_APSTA : WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &config));
     if (!station_running)
         ESP_ERROR_CHECK(esp_wifi_start());
@@ -391,12 +448,18 @@ static esp_err_t start_provisioning(bool station_running)
                         : ESP_ERR_NO_MEM);
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     server_config.uri_match_fn = httpd_uri_match_wildcard;
+    server_config.max_uri_handlers = 12;
+    server_config.max_open_sockets = 3;
+    server_config.stack_size = 6144;
+    server_config.lru_purge_enable = true;
+    server_config.recv_wait_timeout = 5;
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &server_config));
     const httpd_uri_t root = {.uri = "/*", .method = HTTP_GET, .handler = setup_page};
     const httpd_uri_t configure = {
         .uri = "/configure", .method = HTTP_POST, .handler = save_config};
     const httpd_uri_t networks = {.uri = "/networks", .method = HTTP_GET, .handler = saved_networks};
+    wifi_setup_register(server);
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &networks));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &configure));
@@ -404,6 +467,7 @@ static esp_err_t start_provisioning(bool station_running)
     atomic_store(&provisioning, true);
     setup_website = false;
     ui_show_setup(setup_ssid, false);
+    ESP_ERROR_CHECK(xTaskCreate(setup_screen_task, "setup_screen", 3072, NULL, 2, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_LOGI(TAG, "provisioning AP %s", setup_ssid);
     return ESP_ERR_NOT_FINISHED;
 }

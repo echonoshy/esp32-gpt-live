@@ -2,6 +2,7 @@ mod adpcm;
 mod codex;
 mod context;
 mod conversation;
+mod firmware;
 mod live;
 mod preferences;
 mod ptt;
@@ -93,6 +94,8 @@ async fn main() -> Result<()> {
     });
     let routes = Router::new()
         .route("/health", get(health))
+        .route("/api/firmware/latest", get(firmware::manifest))
+        .route("/api/firmware/{sha}", get(firmware::image))
         .route("/device", get(device_upgrade))
         .route("/worker", get(worker_upgrade))
         .route(

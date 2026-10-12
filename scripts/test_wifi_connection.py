@@ -17,6 +17,7 @@ preamble = r'''
 #include <stdio.h>
 #include <string.h>
 #include <setjmp.h>
+#include <stdatomic.h>
 #define WIFI_CONNECTED 1
 #define WIFI_DISCONNECTED 2
 #define WIFI_EXHAUSTED 4
@@ -32,6 +33,14 @@ preamble = r'''
 typedef unsigned EventBits_t;
 typedef struct { int num; } wifi_sta_list_t;
 static int ap_clients, setup_pauses;
+static atomic_bool setup_claimed;
+static bool held, claim_during_attempt;
+static int radio_busy_count;
+static bool voice_wifi_radio_take(void) {
+    if (radio_busy_count) { radio_busy_count--; return false; }
+    assert(!held); held=true; return true;
+}
+static void voice_wifi_radio_give(void) { assert(held); held=false; }
 static int esp_wifi_ap_get_sta_list(wifi_sta_list_t *clients) { clients->num = ap_clients; return ESP_OK; }
 typedef struct { struct { unsigned char ssid[32], password[64]; struct {int authmode;} threshold; } sta; } wifi_config_t;
 static wifi_profiles_t saved_profiles;
@@ -43,7 +52,7 @@ static jmp_buf done;
 static unsigned flags;
 static bool voice_wifi_provisioning(void) { return provisioning; }
 static void ui_set(const char *a, const char *b) { (void)a; (void)b; }
-static void vTaskDelay(unsigned ticks) { (void)ticks; if (ap_clients) { ap_clients--; setup_pauses++; } }
+static void vTaskDelay(unsigned ticks) { (void)ticks; if (setup_claimed && !held) longjmp(done, 1); if (ap_clients) { ap_clients--; setup_pauses++; } }
 static void esp_restart(void) { restarted++; longjmp(done, 1); }
 static unsigned xEventGroupClearBits(int group, unsigned bits)
 { (void)group; flags &= ~bits; return flags; }
@@ -52,7 +61,7 @@ static unsigned xEventGroupSetBits(int group, unsigned bits)
 static unsigned xEventGroupWaitBits(int group, unsigned bits, int clear, int all, unsigned timeout)
 {
     (void)group; (void)clear; (void)all;
-    if (bits == (WIFI_CONNECTED | WIFI_DISCONNECTED)) return outcomes[position - 1];
+    if (bits == (WIFI_CONNECTED | WIFI_DISCONNECTED)) { if(claim_during_attempt)setup_claimed=true; return outcomes[position - 1]; }
     if (bits == WIFI_RETRY) { resumes++; provisioning = true; ap_clients = 3; return WIFI_RETRY; }
     assert(bits == WIFI_DISCONNECTED);
     if (timeout == portMAX_DELAY) stable++;
@@ -62,7 +71,7 @@ static unsigned xEventGroupWaitBits(int group, unsigned bits, int clear, int all
 static int esp_wifi_set_config(int interface, const wifi_config_t *config)
 {
     (void)interface;
-    assert(!ap_clients);
+    assert(!ap_clients); assert(held);
     if (position == limit) longjmp(done, 1);
     assert(!strcmp((const char *)config->sta.ssid, expected[position]));
     assert(config->sta.threshold.authmode == WIFI_AUTH_WPA2_PSK);
@@ -76,6 +85,7 @@ tests = r'''
 static void reset(void)
 {
     position = cleanup = exhausted = resumes = stable = restarted = 0;
+    held=claim_during_attempt=setup_claimed=false; radio_busy_count=0;
     provisioning = false; flags = 0; ap_clients = setup_pauses = 0;
     memset(&saved_profiles, 0, sizeof(saved_profiles));
     saved_profiles.count = 3;
@@ -120,6 +130,15 @@ int main(void)
     outcomes[0] = WIFI_DISCONNECTED; outcomes[1] = WIFI_CONNECTED;
     if (!setjmp(done)) connection_task(NULL);
     assert(exhausted == 1 && restarted == 1);
+    reset(); limit=1; radio_busy_count=3;
+    expected[0]="Home"; outcomes[0]=WIFI_CONNECTED;
+    if (!setjmp(done)) connection_task(NULL);
+    assert(position==1 && radio_busy_count==0); // Scan owns radio before retry starts.
+
+    reset(); limit=1; provisioning=true; claim_during_attempt=true;
+    expected[0]="Home"; outcomes[0]=WIFI_CONNECTED;
+    if (!setjmp(done)) connection_task(NULL);
+    assert(!restarted && !held && setup_claimed); // A phone claims setup mid-attempt.
     puts("PASS: missing AP/auth failure fallthrough, DHCP timeout cleanup, stable connection, disconnect roaming, fallback AP, late hotspot, setup-client pause, legacy single profile");
 }
 '''
@@ -137,9 +156,7 @@ with tempfile.TemporaryDirectory(prefix='mic-on-wifi-test-') as folder:
 
 # Both embedded browser scripts must still parse after the network controls change.
 html = (root/'firmware/main/settings.html').read_text()
-page = source[source.index('static const char page[]'):source.index('httpd_resp_set_type(request, "text/html')]
-import ast
-html += ''.join(ast.literal_eval(s) for s in re.findall(r'"(?:[^"\\]|\\.)*"', page))
+html += (root/'firmware/main/setup.html').read_text()
 for script in re.findall(r'<script>(.*?)</script>', html, re.S):
     subprocess.run(['node', '--check'], input=script, text=True, check=True)
 print('PASS: settings and captive-portal JavaScript syntax')

@@ -27,6 +27,7 @@
 #include "esp_ota_ops.h"
 #include "settings.h"
 #include "portal.h"
+#include "firmware_update.h"
 #include "device.h"
 #include "menu.h"
 #include "controls.h"
@@ -333,7 +334,7 @@ static void mute(void)
 }
 static void idle_ui(void)
 {
-    ui_set("READY", "Hold OK: home");
+    if (!portal_updating() && !settings_open) ui_set("READY", "Hold OK: home");
 }
 static void retry(void)
 {
@@ -449,6 +450,8 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
             uint32_t e = cJSON_IsNumber(ev) ? (uint32_t)ev->valuedouble : 0;
             if (atomic_load(&serial_trace))
                 ESP_LOGI(TAG, "trace rx %s", payload);
+            // Late voice status cannot overwrite update progress or restart controls.
+            if (portal_updating()) { cJSON_Delete(m); return; }
             if (!strcmp(type, "status") && cJSON_IsString(state)) {
                 ESP_LOGI(TAG, "session %s", state->valuestring);
                 if (!strcmp(state->valuestring, "ready") && atomic_load(&wanted)) {
@@ -827,19 +830,19 @@ static void command_task(void *unused)
                 ui_show_guide();
                 if (voice_wifi_request_setup() != ESP_OK)
                     ui_set("SETUP UNAVAILABLE", "Restart and retry");
-            } else if (action == MENU_PHONE) {
+            } else if (action == MENU_UPDATE) {
                 if (voice_wifi_connected()) {
-                    // The menu explicitly confirms ending the conversation before maintenance.
                     atomic_store(&restart_pending, false);
-                    if (device_busy())
-                        stop_session();
+                    if (device_busy()) stop_session();
                     atomic_store(&menu_active, false);
                     settings_open = true;
-                    portal_arm();
+                    ui_show_update();
+                    if (firmware_update_start() != ESP_OK)
+                        ui_set("UPDATE UNAVAILABLE", "OK: back / retry");
                 } else {
                     menu_notice = true;
                     const char *items[] = {"Connect Wi-Fi first", "Network > Connect"};
-                    ui_show_menu("WEB SETUP", items, 2, 0, "OK / hold OK: back");
+                    ui_show_menu("UPDATE UNAVAILABLE", items, 2, 0, "OK / hold OK: back");
                 }
             }
             // Selecting Voice is the first recording gesture, not a navigation-only press.

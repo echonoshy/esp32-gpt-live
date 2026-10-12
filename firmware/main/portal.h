@@ -2,5 +2,8 @@
 #include <stdbool.h>
 #include "esp_err.h"
 esp_err_t portal_start(void);
-void portal_arm(void);
 bool portal_updating(void);
+
+// Shared ownership prevents browser and on-device updates writing simultaneously.
+bool portal_update_lock(void);
+void portal_update_unlock(void);
